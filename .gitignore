@@ -1,0 +1,5 @@
+# Migration report output files
+migration-scoping-report-*.txt
+
+# Temporary data directory
+temp_migration_data/
