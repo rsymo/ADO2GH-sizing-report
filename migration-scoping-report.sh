@@ -28,14 +28,14 @@ call_api() {
     local endpoint="$1"
     # Use -f to fail on HTTP errors, but capture output
     # Use -L to follow redirects
-    curl -s -f -L -u ":$PAT" "$endpoint" || echo "API_ERROR"
+    curl -s -S -f -L -u ":$PAT" "$endpoint" || echo "API_ERROR"
 }
 
 # Function to make Azure DevOps API POST calls
 call_api_post() {
     local endpoint="$1"
     local data="$2"
-    curl -s -f -L -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" || echo "API_ERROR"
+    curl -s -S -f -L -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" || echo "API_ERROR"
 }
 
 # Function to safely extract a numeric value from JSON.
