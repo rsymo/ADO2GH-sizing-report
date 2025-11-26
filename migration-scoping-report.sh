@@ -43,7 +43,7 @@ call_api_post() {
 safe_jq_count() {
     local json="$1"
     local path="$2"
-    if [ "$json" == "API_ERROR" ] || ! echo "$json" | jq empty 2>/dev/null; then
+    if [ "$json" = "API_ERROR" ] || ! echo "$json" | jq empty 2>/dev/null; then
         echo "0"
     else
         echo "$json" | jq -r "$path // 0" 2>/dev/null || echo "0"
