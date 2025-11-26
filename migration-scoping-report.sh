@@ -38,7 +38,8 @@ call_api_post() {
     curl -s -f -L -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" || echo "API_ERROR"
 }
 
-# Function to safely extract a numeric value from JSON, returns 0 on error
+# Function to safely extract a numeric value from JSON.
+# Returns 0 if the API call fails (input is "API_ERROR"), JSON is invalid, or the path doesn't exist.
 safe_jq_count() {
     local json="$1"
     local path="$2"
