@@ -23,10 +23,31 @@ API_VERSION="7.1-preview.1"
 
 # -------- HELPER FUNCTIONS --------
 
-# Function to make Azure DevOps API calls
+# Function to make Azure DevOps API calls (GET requests)
 call_api() {
     local endpoint="$1"
-    curl -s -u ":$PAT" "$endpoint"
+    # Use -f to fail on HTTP errors, but capture output
+    # Use -L to follow redirects
+    curl -s -S -f -L -u ":$PAT" "$endpoint" || echo "API_ERROR"
+}
+
+# Function to make Azure DevOps API POST calls
+call_api_post() {
+    local endpoint="$1"
+    local data="$2"
+    curl -s -S -f -L -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" || echo "API_ERROR"
+}
+
+# Function to safely extract a numeric value from JSON.
+# Returns 0 if the API call fails (input is "API_ERROR"), JSON is invalid, or the path doesn't exist.
+safe_jq_count() {
+    local json="$1"
+    local path="$2"
+    if [ "$json" = "API_ERROR" ] || ! echo "$json" | jq empty 2>/dev/null; then
+        echo "0"
+    else
+        echo "$json" | jq -r "$path // 0" 2>/dev/null || echo "0"
+    fi
 }
 
 # Function to write section header to report
@@ -53,7 +74,16 @@ write_section "1. Repository Count"
 echo "Collecting repository data..." | tee -a "$REPORT_FILE"
 
 # Get all projects
-projects=$(call_api "$ORG_URL/_apis/projects?api-version=$API_VERSION" | jq -r '.value[].name')
+projects_response=$(call_api "$ORG_URL/_apis/projects?api-version=$API_VERSION")
+
+# Validate JSON response
+if [ "$projects_response" == "API_ERROR" ] || ! echo "$projects_response" | jq empty 2>/dev/null; then
+    echo "ERROR: Failed to retrieve projects from Azure DevOps API" | tee -a "$REPORT_FILE"
+    echo "Response: $projects_response" | tee -a "$REPORT_FILE"
+    exit 1
+fi
+
+projects=$(echo "$projects_response" | jq -r '.value[].name')
 total_repos=0
 project_count=0
 
@@ -66,6 +96,13 @@ for project in $projects; do
     
     # Get repos for this project
     repos_json=$(call_api "$ORG_URL/$project/_apis/git/repositories?api-version=$API_VERSION")
+    
+    # Validate JSON response before processing
+    if [ "$repos_json" == "API_ERROR" ] || ! echo "$repos_json" | jq empty 2>/dev/null; then
+        echo "WARNING: Failed to retrieve repositories for project '$project' (skipping)" | tee -a "$REPORT_FILE"
+        continue
+    fi
+    
     repo_count=$(echo "$repos_json" | jq -r '.value | length')
     total_repos=$((total_repos + repo_count))
     
@@ -130,22 +167,43 @@ oldest_date=""
 oldest_repo=""
 oldest_commit=""
 
+# Clear any existing oldest_commits.txt file
+rm -f "$TEMP_DATA_DIR/oldest_commits.txt"
+
 if [ -f "$REPO_DETAILS_FILE" ]; then
-    jq -c '.[]' "$REPO_DETAILS_FILE" | while read -r repo; do
+    # Use process substitution instead of pipe to avoid subshell issues
+    while read -r repo; do
         project=$(echo "$repo" | jq -r '.project')
         repo_name=$(echo "$repo" | jq -r '.name')
         repo_id=$(echo "$repo" | jq -r '.id')
         
+        echo "Checking commits for $project/$repo_name..." | tee -a "$REPORT_FILE"
+        
         # Get oldest commit (order by date ascending, take first)
+        # Add error handling to prevent script from exiting on API failures
         commit_data=$(call_api "$ORG_URL/$project/_apis/git/repositories/$repo_id/commits?\$top=1&\$orderby=committer/date asc&api-version=$API_VERSION")
         
-        if [ "$(echo "$commit_data" | jq -r '.count')" -gt 0 ]; then
-            commit_date=$(echo "$commit_data" | jq -r '.value[0].committer.date')
-            commit_id=$(echo "$commit_data" | jq -r '.value[0].commitId')
-            
-            echo "$commit_date|$project/$repo_name|$commit_id" >> "$TEMP_DATA_DIR/oldest_commits.txt"
+        # Validate JSON before processing
+        if [ "$commit_data" == "API_ERROR" ] || ! echo "$commit_data" | jq empty 2>/dev/null; then
+            echo "  WARNING: Invalid API response for $project/$repo_name (skipping)" | tee -a "$REPORT_FILE"
+            continue
         fi
-    done
+        
+        commit_count=$(echo "$commit_data" | jq -r '.count // 0' 2>/dev/null || echo "0")
+        
+        if [ "$commit_count" -gt 0 ]; then
+            commit_date=$(echo "$commit_data" | jq -r '.value[0].committer.date' 2>/dev/null || echo "")
+            commit_id=$(echo "$commit_data" | jq -r '.value[0].commitId' 2>/dev/null || echo "")
+            
+            if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
+                echo "$commit_date|$project/$repo_name|$commit_id" >> "$TEMP_DATA_DIR/oldest_commits.txt"
+            else
+                echo "  No valid commit date found for $project/$repo_name" | tee -a "$REPORT_FILE"
+            fi
+        else
+            echo "  No commits found in $project/$repo_name" | tee -a "$REPORT_FILE"
+        fi
+    done < <(jq -c '.[]' "$REPO_DETAILS_FILE")
     
     if [ -f "$TEMP_DATA_DIR/oldest_commits.txt" ]; then
         oldest_line=$(sort "$TEMP_DATA_DIR/oldest_commits.txt" | head -n 1)
@@ -197,10 +255,11 @@ total_pull_requests=0
 projects_with_boards=0
 
 for project in $projects; do
-    # Check for work items
-    work_items=$(call_api "$ORG_URL/$project/_apis/wit/wiql?api-version=$API_VERSION" \
-        -H "Content-Type: application/json" \
-        -d '{"query": "Select [System.Id] From WorkItems"}' | jq -r '.workItems | length')
+    echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
+    
+    # Check for work items using POST request
+    wi_response=$(call_api_post "$ORG_URL/$project/_apis/wit/wiql?api-version=$API_VERSION" '{"query": "Select [System.Id] From WorkItems"}')
+    work_items=$(safe_jq_count "$wi_response" '.workItems | length')
     
     total_work_items=$((total_work_items + work_items))
     
@@ -209,13 +268,15 @@ for project in $projects; do
         project_repos=$(jq -r ".[] | select(.project == \"$project\") | .id" "$REPO_DETAILS_FILE")
         
         for repo_id in $project_repos; do
-            pr_count=$(call_api "$ORG_URL/$project/_apis/git/repositories/$repo_id/pullrequests?api-version=$API_VERSION" | jq -r '.count')
+            pr_response=$(call_api "$ORG_URL/$project/_apis/git/repositories/$repo_id/pullrequests?api-version=$API_VERSION")
+            pr_count=$(safe_jq_count "$pr_response" '.count')
             total_pull_requests=$((total_pull_requests + pr_count))
         done
     fi
     
     # Check for boards (teams indicate board usage)
-    teams=$(call_api "$ORG_URL/_apis/projects/$project/teams?api-version=$API_VERSION" | jq -r '.count')
+    teams_response=$(call_api "$ORG_URL/_apis/projects/$project/teams?api-version=$API_VERSION")
+    teams=$(safe_jq_count "$teams_response" '.count')
     if [ "$teams" -gt 0 ]; then
         projects_with_boards=$((projects_with_boards + 1))
     fi
@@ -246,16 +307,20 @@ total_pipelines=0
 repos_with_pipelines=0
 
 for project in $projects; do
+    echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
+    
     # Get build definitions (pipelines)
-    pipelines=$(call_api "$ORG_URL/$project/_apis/build/definitions?api-version=$API_VERSION" | jq -r '.count')
+    pipeline_response=$(call_api "$ORG_URL/$project/_apis/build/definitions?api-version=$API_VERSION")
+    pipelines=$(safe_jq_count "$pipeline_response" '.count')
     
     if [ "$pipelines" -gt 0 ]; then
         total_pipelines=$((total_pipelines + pipelines))
         
-        # Get details about which repos have pipelines
-        pipeline_data=$(call_api "$ORG_URL/$project/_apis/build/definitions?api-version=$API_VERSION")
-        repo_count=$(echo "$pipeline_data" | jq '[.value[].repository.id] | unique | length')
-        repos_with_pipelines=$((repos_with_pipelines + repo_count))
+        # Get details about which repos have pipelines (reuse existing response)
+        if [ "$pipeline_response" != "API_ERROR" ] && echo "$pipeline_response" | jq empty 2>/dev/null; then
+            repo_count=$(echo "$pipeline_response" | jq '[.value[].repository.id] | unique | length' 2>/dev/null || echo "0")
+            repos_with_pipelines=$((repos_with_pipelines + repo_count))
+        fi
     fi
 done
 
@@ -283,15 +348,19 @@ total_hooks=0
 hook_types=()
 
 for project in $projects; do
+    echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
+    
     # Get service hooks
     hooks=$(call_api "$ORG_URL/$project/_apis/hooks/subscriptions?api-version=$API_VERSION")
-    hook_count=$(echo "$hooks" | jq -r '.count')
+    hook_count=$(safe_jq_count "$hooks" '.count')
     
     if [ "$hook_count" -gt 0 ]; then
         total_hooks=$((total_hooks + hook_count))
         
-        # Collect hook types
-        echo "$hooks" | jq -r '.value[].consumerType' >> "$TEMP_DATA_DIR/hook_types.txt"
+        # Collect hook types (only if valid JSON)
+        if [ "$hooks" != "API_ERROR" ] && echo "$hooks" | jq empty 2>/dev/null; then
+            echo "$hooks" | jq -r '.value[].consumerType' 2>/dev/null >> "$TEMP_DATA_DIR/hook_types.txt"
+        fi
     fi
 done
 
@@ -320,15 +389,15 @@ echo "Collecting user information..." | tee -a "$REPORT_FILE"
 
 # Get organization users
 users=$(call_api "$ORG_URL/_apis/userentitlements?api-version=$API_VERSION")
-user_count=$(echo "$users" | jq -r '.totalCount // 0')
+user_count=$(safe_jq_count "$users" '.totalCount')
 
 echo "Total Users in Organization: $user_count" | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
 
 # Get user access levels
-if [ "$user_count" -gt 0 ]; then
+if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq empty 2>/dev/null; then
     echo "User Access Level Breakdown:" | tee -a "$REPORT_FILE"
-    echo "$users" | jq -r '.members[].accessLevel.accountLicenseType' | sort | uniq -c | while read -r count level; do
+    echo "$users" | jq -r '.members[].accessLevel.accountLicenseType' 2>/dev/null | sort | uniq -c | while read -r count level; do
         echo "  - $level: $count users" | tee -a "$REPORT_FILE"
     done
     
@@ -341,7 +410,7 @@ if [ "$user_count" -gt 0 ]; then
     # Export user list to CSV
     USER_CSV="$TEMP_DATA_DIR/users.csv"
     echo "displayName,emailAddress,accessLevel,lastAccessDate" > "$USER_CSV"
-    echo "$users" | jq -r '.members[] | "\(.user.displayName),\(.user.mailAddress),\(.accessLevel.accountLicenseType),\(.lastAccessedDate)"' >> "$USER_CSV"
+    echo "$users" | jq -r '.members[] | "\(.user.displayName),\(.user.mailAddress),\(.accessLevel.accountLicenseType),\(.lastAccessedDate)"' 2>/dev/null >> "$USER_CSV"
     echo "" | tee -a "$REPORT_FILE"
     echo "User details exported to: $USER_CSV" | tee -a "$REPORT_FILE"
 fi
