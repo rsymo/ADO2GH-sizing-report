@@ -6,17 +6,23 @@
 # This script generates a comprehensive migration scoping report
 # for Azure DevOps to GitHub migrations.
 
-set -e
+# Note: set -e is NOT used to allow graceful error handling
 
 # -------- CONFIGURATION --------
+# Set DEBUG=1 to see detailed API calls, DEBUG=0 for cleaner output
+DEBUG=${DEBUG:-0}
 ORG="your-org-name"
 PAT="your-personal-access-token"
 ORG_URL="https://dev.azure.com/$ORG"
 
-# Report output file
-REPORT_FILE="migration-scoping-report-$(date +%Y%m%d-%H%M%S).txt"
-TEMP_DATA_DIR="temp_migration_data"
+# Report output file with microsecond precision and random component for uniqueness
+REPORT_FILE="migration-scoping-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
+# Use PID to create unique temp directory to avoid conflicts with concurrent runs
+TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
+
+# Set up cleanup trap to remove temp directory on exit (success or failure)
+trap 'rm -rf "$TEMP_DATA_DIR"' EXIT INT TERM
 
 # API version
 API_VERSION="7.1-preview.1"
@@ -26,16 +32,19 @@ API_VERSION="7.1-preview.1"
 # Function to make Azure DevOps API calls (GET requests)
 call_api() {
     local endpoint="$1"
-    # Use -f to fail on HTTP errors, but capture output
-    # Use -L to follow redirects
-    curl -s -S -f -L -u ":$PAT" "$endpoint" || echo "API_ERROR"
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] GET: $endpoint" >&2
+    # Use -f to fail on HTTP errors, suppress all error output to avoid log noise
+    # Use -L to follow redirects, --max-time for timeout (30 seconds)
+    # --retry 2 for transient failures
+    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 -u ":$PAT" "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
 
 # Function to make Azure DevOps API POST calls
 call_api_post() {
     local endpoint="$1"
     local data="$2"
-    curl -s -S -f -L -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" || echo "API_ERROR"
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] POST: $endpoint" >&2
+    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
 
 # Function to safely extract a numeric value from JSON.
@@ -48,6 +57,31 @@ safe_jq_count() {
     else
         echo "$json" | jq -r "$path // 0" 2>/dev/null || echo "0"
     fi
+}
+
+# Function to URL encode strings (for project names with special characters)
+# This version properly handles UTF-8 and all special characters
+url_encode() {
+    local string="$1"
+    local length="${#string}"
+    local encoded=""
+    local pos c o
+    
+    for (( pos=0; pos<length; pos++ )); do
+        c="${string:pos:1}"
+        case "$c" in
+            [-_.~a-zA-Z0-9]) 
+                # Keep safe characters as-is
+                encoded+="$c" 
+                ;;
+            *)
+                # Convert to hex using printf - works with UTF-8
+                printf -v o '%%%02X' "'$c"
+                encoded+="$o"
+                ;;
+        esac
+    done
+    echo "$encoded"
 }
 
 # Function to write section header to report
@@ -66,6 +100,20 @@ echo "Organization: $ORG" | tee -a "$REPORT_FILE"
 echo "Generated: $(date)" | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
 
+# Validate PAT and organization access early
+echo "Validating authentication and organization access..." | tee -a "$REPORT_FILE"
+validation_test=$(call_api "$ORG_URL/_apis/projects?%24top=1&api-version=$API_VERSION")
+if [ "$validation_test" = "API_ERROR" ]; then
+    echo "ERROR: Failed to authenticate with Azure DevOps" | tee -a "$REPORT_FILE"
+    echo "Please verify:" | tee -a "$REPORT_FILE"
+    echo "  1. Organization name is correct: $ORG" | tee -a "$REPORT_FILE"
+    echo "  2. PAT is valid and not expired" | tee -a "$REPORT_FILE"
+    echo "  3. PAT has 'Project and Team (Read)' scope" | tee -a "$REPORT_FILE"
+    exit 1
+fi
+echo "Authentication successful!" | tee -a "$REPORT_FILE"
+echo "" | tee -a "$REPORT_FILE"
+
 # ========================================
 # 1. REPOSITORY COUNT
 # ========================================
@@ -77,13 +125,26 @@ echo "Collecting repository data..." | tee -a "$REPORT_FILE"
 projects_response=$(call_api "$ORG_URL/_apis/projects?api-version=$API_VERSION")
 
 # Validate JSON response
-if [ "$projects_response" == "API_ERROR" ] || ! echo "$projects_response" | jq empty 2>/dev/null; then
+if [ "$projects_response" = "API_ERROR" ] || ! echo "$projects_response" | jq empty 2>/dev/null; then
     echo "ERROR: Failed to retrieve projects from Azure DevOps API" | tee -a "$REPORT_FILE"
     echo "Response: $projects_response" | tee -a "$REPORT_FILE"
     exit 1
 fi
 
-projects=$(echo "$projects_response" | jq -r '.value[].name')
+# Use mapfile/readarray to handle project names with spaces/special characters
+# Filter out null and empty values
+mapfile -t projects < <(echo "$projects_response" | jq -r '.value[].name | select(. != null and . != "")')
+
+# Check if we actually have any projects
+if [ ${#projects[@]} -eq 0 ] || [ -z "${projects[0]:-}" ]; then
+    echo "WARNING: No projects found in organization" | tee -a "$REPORT_FILE"
+    echo "Total Projects: 0" | tee -a "$REPORT_FILE"
+    echo "Total Repositories: 0" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    echo "Nothing to migrate - exiting" | tee -a "$REPORT_FILE"
+    exit 0
+fi
+
 total_repos=0
 project_count=0
 
@@ -91,14 +152,20 @@ project_count=0
 REPO_DETAILS_FILE="$TEMP_DATA_DIR/repo_details.json"
 echo "[]" > "$REPO_DETAILS_FILE"
 
-for project in $projects; do
+for project in "${projects[@]}"; do
+    # Skip empty project names (shouldn't happen after filtering, but safety check)
+    [ -z "$project" ] && continue
+    
     project_count=$((project_count + 1))
     
+    # URL encode project name to handle special characters
+    project_encoded=$(url_encode "$project")
+    
     # Get repos for this project
-    repos_json=$(call_api "$ORG_URL/$project/_apis/git/repositories?api-version=$API_VERSION")
+    repos_json=$(call_api "$ORG_URL/$project_encoded/_apis/git/repositories?api-version=$API_VERSION")
     
     # Validate JSON response before processing
-    if [ "$repos_json" == "API_ERROR" ] || ! echo "$repos_json" | jq empty 2>/dev/null; then
+    if [ "$repos_json" = "API_ERROR" ] || ! echo "$repos_json" | jq empty 2>/dev/null; then
         echo "WARNING: Failed to retrieve repositories for project '$project' (skipping)" | tee -a "$REPORT_FILE"
         continue
     fi
@@ -107,13 +174,19 @@ for project in $projects; do
     total_repos=$((total_repos + repo_count))
     
     # Store repo details for later analysis
-    echo "$repos_json" | jq -c ".value[] | {project: \"$project\", name: .name, id: .id, size: .size, defaultBranch: .defaultBranch, remoteUrl: .remoteUrl}" >> "$REPO_DETAILS_FILE.tmp"
+    # Use jq --arg to safely pass project name (handles quotes and backslashes)
+    echo "$repos_json" | jq -c --arg proj "$project" '.value[] | {project: $proj, name: .name, id: .id, size: .size, defaultBranch: .defaultBranch, remoteUrl: .remoteUrl}' >> "$REPO_DETAILS_FILE.tmp"
 done
 
 # Consolidate all repo details into a single JSON array
-if [ -f "$REPO_DETAILS_FILE.tmp" ]; then
+if [ -f "$REPO_DETAILS_FILE.tmp" ] && [ -s "$REPO_DETAILS_FILE.tmp" ]; then
+    # File exists and has content
     jq -s '.' "$REPO_DETAILS_FILE.tmp" > "$REPO_DETAILS_FILE"
     rm "$REPO_DETAILS_FILE.tmp"
+else
+    # No repos found in any project, keep empty array
+    echo "[]" > "$REPO_DETAILS_FILE"
+    [ -f "$REPO_DETAILS_FILE.tmp" ] && rm "$REPO_DETAILS_FILE.tmp"
 fi
 
 echo "Total Projects: $project_count" | tee -a "$REPORT_FILE"
@@ -150,8 +223,14 @@ fi
 write_section "3. Largest Repository"
 
 if [ -f "$REPO_DETAILS_FILE" ]; then
-    largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024/1024/1024*100|floor)/100)GB"' "$REPO_DETAILS_FILE")
-    echo "Largest Repository: $largest_repo" | tee -a "$REPORT_FILE"
+    # Check if any repos have size data
+    has_size=$(jq 'any(.size != null)' "$REPO_DETAILS_FILE")
+    if [ "$has_size" = "true" ]; then
+        largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024/1024/1024*100|floor)/100)GB"' "$REPO_DETAILS_FILE")
+        echo "Largest Repository: $largest_repo" | tee -a "$REPORT_FILE"
+    else
+        echo "No repository size data available" | tee -a "$REPORT_FILE"
+    fi
 else
     echo "WARNING: Could not determine largest repository" | tee -a "$REPORT_FILE"
 fi
@@ -171,20 +250,27 @@ oldest_commit=""
 rm -f "$TEMP_DATA_DIR/oldest_commits.txt"
 
 if [ -f "$REPO_DETAILS_FILE" ]; then
-    # Use process substitution instead of pipe to avoid subshell issues
-    while read -r repo; do
-        project=$(echo "$repo" | jq -r '.project')
-        repo_name=$(echo "$repo" | jq -r '.name')
-        repo_id=$(echo "$repo" | jq -r '.id')
+    # Check if file has valid content (more than just [])
+    repo_count_check=$(jq 'length' "$REPO_DETAILS_FILE" 2>/dev/null || echo "0")
+    if [ "$repo_count_check" -gt 0 ]; then
+        # Use process substitution instead of pipe to avoid subshell issues
+        while read -r repo; do
+            project=$(echo "$repo" | jq -r '.project')
+            repo_name=$(echo "$repo" | jq -r '.name')
+            repo_id=$(echo "$repo" | jq -r '.id')
         
         echo "Checking commits for $project/$repo_name..." | tee -a "$REPORT_FILE"
         
+        # URL encode project name
+        project_encoded=$(url_encode "$project")
+        
         # Get oldest commit (order by date ascending, take first)
         # Add error handling to prevent script from exiting on API failures
-        commit_data=$(call_api "$ORG_URL/$project/_apis/git/repositories/$repo_id/commits?\$top=1&\$orderby=committer/date asc&api-version=$API_VERSION")
+        # URL encode $ as %24 to prevent curl errors
+        commit_data=$(call_api "$ORG_URL/$project_encoded/_apis/git/repositories/$repo_id/commits?%24top=1&%24orderby=committer/date%20asc&api-version=$API_VERSION")
         
         # Validate JSON before processing
-        if [ "$commit_data" == "API_ERROR" ] || ! echo "$commit_data" | jq empty 2>/dev/null; then
+        if [ "$commit_data" = "API_ERROR" ] || ! echo "$commit_data" | jq empty 2>/dev/null; then
             echo "  WARNING: Invalid API response for $project/$repo_name (skipping)" | tee -a "$REPORT_FILE"
             continue
         fi
@@ -196,7 +282,8 @@ if [ -f "$REPO_DETAILS_FILE" ]; then
             commit_id=$(echo "$commit_data" | jq -r '.value[0].commitId' 2>/dev/null || echo "")
             
             if [ -n "$commit_date" ] && [ "$commit_date" != "null" ]; then
-                echo "$commit_date|$project/$repo_name|$commit_id" >> "$TEMP_DATA_DIR/oldest_commits.txt"
+                # Use tab as delimiter to avoid conflicts with special characters in names
+                printf '%s\t%s\t%s\n' "$commit_date" "$project/$repo_name" "$commit_id" >> "$TEMP_DATA_DIR/oldest_commits.txt"
             else
                 echo "  No valid commit date found for $project/$repo_name" | tee -a "$REPORT_FILE"
             fi
@@ -205,17 +292,21 @@ if [ -f "$REPO_DETAILS_FILE" ]; then
         fi
     done < <(jq -c '.[]' "$REPO_DETAILS_FILE")
     
-    if [ -f "$TEMP_DATA_DIR/oldest_commits.txt" ]; then
-        oldest_line=$(sort "$TEMP_DATA_DIR/oldest_commits.txt" | head -n 1)
-        oldest_date=$(echo "$oldest_line" | cut -d'|' -f1)
-        oldest_repo=$(echo "$oldest_line" | cut -d'|' -f2)
-        oldest_commit=$(echo "$oldest_line" | cut -d'|' -f3)
+    if [ -f "$TEMP_DATA_DIR/oldest_commits.txt" ] && [ -s "$TEMP_DATA_DIR/oldest_commits.txt" ]; then
+        # Sort by first field (date) explicitly using tab as separator
+        oldest_line=$(LC_ALL=C sort -t$'\t' -k1,1 "$TEMP_DATA_DIR/oldest_commits.txt" | head -n 1)
+        oldest_date=$(echo "$oldest_line" | cut -f1)
+        oldest_repo=$(echo "$oldest_line" | cut -f2)
+        oldest_commit=$(echo "$oldest_line" | cut -f3)
         
         echo "Oldest Repository: $oldest_repo" | tee -a "$REPORT_FILE"
         echo "First Commit Date: $oldest_date" | tee -a "$REPORT_FILE"
         echo "Commit ID: $oldest_commit" | tee -a "$REPORT_FILE"
     else
         echo "No commit history found" | tee -a "$REPORT_FILE"
+    fi
+    else
+        echo "No repositories with valid data found" | tee -a "$REPORT_FILE"
     fi
 else
     echo "WARNING: Could not determine oldest repository" | tee -a "$REPORT_FILE"
@@ -254,28 +345,35 @@ total_work_items=0
 total_pull_requests=0
 projects_with_boards=0
 
-for project in $projects; do
+for project in "${projects[@]}"; do
     echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
     
+    # URL encode project name
+    project_encoded=$(url_encode "$project")
+    
     # Check for work items using POST request
-    wi_response=$(call_api_post "$ORG_URL/$project/_apis/wit/wiql?api-version=$API_VERSION" '{"query": "Select [System.Id] From WorkItems"}')
+    wi_response=$(call_api_post "$ORG_URL/$project_encoded/_apis/wit/wiql?api-version=$API_VERSION" '{"query": "Select [System.Id] From WorkItems"}')
     work_items=$(safe_jq_count "$wi_response" '.workItems | length')
     
     total_work_items=$((total_work_items + work_items))
     
     # Check for pull requests
     if [ -f "$REPO_DETAILS_FILE" ]; then
-        project_repos=$(jq -r ".[] | select(.project == \"$project\") | .id" "$REPO_DETAILS_FILE")
+        # Use mapfile to safely handle repo IDs, use jq --arg for safe string passing
+        mapfile -t project_repos < <(jq -r --arg proj "$project" '.[] | select(.project == $proj) | .id' "$REPO_DETAILS_FILE")
         
-        for repo_id in $project_repos; do
-            pr_response=$(call_api "$ORG_URL/$project/_apis/git/repositories/$repo_id/pullrequests?api-version=$API_VERSION")
-            pr_count=$(safe_jq_count "$pr_response" '.count')
-            total_pull_requests=$((total_pull_requests + pr_count))
-        done
+        # Only loop if we actually have repo IDs (skip empty array)
+        if [ ${#project_repos[@]} -gt 0 ] && [ -n "${project_repos[0]}" ]; then
+            for repo_id in "${project_repos[@]}"; do
+                pr_response=$(call_api "$ORG_URL/$project_encoded/_apis/git/repositories/$repo_id/pullrequests?api-version=$API_VERSION")
+                pr_count=$(safe_jq_count "$pr_response" '.count')
+                total_pull_requests=$((total_pull_requests + pr_count))
+            done
+        fi
     fi
     
     # Check for boards (teams indicate board usage)
-    teams_response=$(call_api "$ORG_URL/_apis/projects/$project/teams?api-version=$API_VERSION")
+    teams_response=$(call_api "$ORG_URL/_apis/projects/$project_encoded/teams?api-version=$API_VERSION")
     teams=$(safe_jq_count "$teams_response" '.count')
     if [ "$teams" -gt 0 ]; then
         projects_with_boards=$((projects_with_boards + 1))
@@ -306,11 +404,14 @@ echo "Checking for existing pipelines..." | tee -a "$REPORT_FILE"
 total_pipelines=0
 repos_with_pipelines=0
 
-for project in $projects; do
+for project in "${projects[@]}"; do
     echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
     
+    # URL encode project name
+    project_encoded=$(url_encode "$project")
+    
     # Get build definitions (pipelines)
-    pipeline_response=$(call_api "$ORG_URL/$project/_apis/build/definitions?api-version=$API_VERSION")
+    pipeline_response=$(call_api "$ORG_URL/$project_encoded/_apis/build/definitions?api-version=$API_VERSION")
     pipelines=$(safe_jq_count "$pipeline_response" '.count')
     
     if [ "$pipelines" -gt 0 ]; then
@@ -347,11 +448,14 @@ echo "Checking for service hooks and integrations..." | tee -a "$REPORT_FILE"
 total_hooks=0
 hook_types=()
 
-for project in $projects; do
+for project in "${projects[@]}"; do
     echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
     
+    # URL encode project name
+    project_encoded=$(url_encode "$project")
+    
     # Get service hooks
-    hooks=$(call_api "$ORG_URL/$project/_apis/hooks/subscriptions?api-version=$API_VERSION")
+    hooks=$(call_api "$ORG_URL/$project_encoded/_apis/hooks/subscriptions?api-version=$API_VERSION")
     hook_count=$(safe_jq_count "$hooks" '.count')
     
     if [ "$hook_count" -gt 0 ]; then
@@ -367,10 +471,10 @@ done
 echo "Total Service Hooks: $total_hooks" | tee -a "$REPORT_FILE"
 
 if [ -f "$TEMP_DATA_DIR/hook_types.txt" ]; then
-    unique_hooks=$(sort "$TEMP_DATA_DIR/hook_types.txt" | uniq)
     echo "" | tee -a "$REPORT_FILE"
     echo "Integration Types Found:" | tee -a "$REPORT_FILE"
-    echo "$unique_hooks" | while read -r hook; do
+    # Process file directly to avoid subshell and properly handle spaces
+    sort "$TEMP_DATA_DIR/hook_types.txt" | uniq | while read -r hook; do
         echo "  - $hook" | tee -a "$REPORT_FILE"
     done
     echo "" | tee -a "$REPORT_FILE"
@@ -410,7 +514,8 @@ if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq 
     # Export user list to CSV
     USER_CSV="$TEMP_DATA_DIR/users.csv"
     echo "displayName,emailAddress,accessLevel,lastAccessDate" > "$USER_CSV"
-    echo "$users" | jq -r '.members[] | "\(.user.displayName),\(.user.mailAddress),\(.accessLevel.accountLicenseType),\(.lastAccessedDate)"' 2>/dev/null >> "$USER_CSV"
+    # Use jq @csv to properly escape fields with commas, quotes, and newlines
+    echo "$users" | jq -r '.members[] | [.user.displayName, .user.mailAddress, .accessLevel.accountLicenseType, .lastAccessedDate] | @csv' 2>/dev/null >> "$USER_CSV"
     echo "" | tee -a "$REPORT_FILE"
     echo "User details exported to: $USER_CSV" | tee -a "$REPORT_FILE"
 fi
@@ -469,8 +574,6 @@ echo "" | tee -a "$REPORT_FILE"
 echo "========================================" | tee -a "$REPORT_FILE"
 echo "Report generation complete!" | tee -a "$REPORT_FILE"
 echo "Report saved to: $REPORT_FILE" | tee -a "$REPORT_FILE"
-echo "Supporting data saved to: $TEMP_DATA_DIR/" | tee -a "$REPORT_FILE"
 echo "========================================" | tee -a "$REPORT_FILE"
 
-# Cleanup option (commented out - uncomment to auto-cleanup)
-# rm -rf "$TEMP_DATA_DIR"
+# Temp directory will be automatically cleaned up by trap on exit
