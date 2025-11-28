@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ========================================
-# Azure DevOps Migration Scoping Report
+# Azure DevOps Data Collector
 # ========================================
-# This script generates a comprehensive migration scoping report
-# for Azure DevOps to GitHub migrations.
+# This script collects data from Azure DevOps organizations
+# for GitHub migration planning.
 
 # Note: set -e is NOT used to allow graceful error handling
 
@@ -16,7 +16,7 @@ PAT="your-personal-access-token"
 ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
-REPORT_FILE="migration-scoping-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
+REPORT_FILE="ado-data-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
 # Use PID to create unique temp directory to avoid conflicts with concurrent runs
 TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
@@ -95,7 +95,7 @@ write_section() {
 }
 
 # -------- START REPORT --------
-echo "Generating Azure DevOps Migration Scoping Report..." | tee "$REPORT_FILE"
+echo "Generating Azure DevOps Data Collection Report..." | tee "$REPORT_FILE"
 echo "Organization: $ORG" | tee -a "$REPORT_FILE"
 echo "Generated: $(date)" | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
@@ -317,27 +317,18 @@ fi
 # ========================================
 write_section "5. Binary and Large Files"
 
-echo "NOTE: Binary/large file detection requires manual inspection:" | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-echo "Recommended approaches:" | tee -a "$REPORT_FILE"
-echo "1. UI Method: Check each repository's 'Overall reachable repository size'" | tee -a "$REPORT_FILE"
-echo "   or 'Size of reachable blobs' in Azure DevOps repository settings." | tee -a "$REPORT_FILE"
-echo "   Flag any repositories not showing 'Healthy' status." | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-echo "2. Script Method: For suspicious repositories (see large repos above)," | tee -a "$REPORT_FILE"
-echo "   clone the repository and run:" | tee -a "$REPORT_FILE"
-echo "   git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | sort -k3 -n -r | head -20" | tee -a "$REPORT_FILE"
+echo "NOTE: Binary/large file detection requires manual inspection of repository settings." | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
 
 if [ "$large_repos" -gt 0 ]; then
-    echo "RECOMMENDATION: The following repositories are over 1GB and should be checked:" | tee -a "$REPORT_FILE"
+    echo "Repositories over 1GB:" | tee -a "$REPORT_FILE"
     echo "$large_repos_json" | jq -r '.[] | "  - \(.project)/\(.name)"' | tee -a "$REPORT_FILE"
 fi
 
 # ========================================
-# 6. METADATA MIGRATION NEEDS
+# 6. METADATA DATA
 # ========================================
-write_section "6. Metadata Migration Requirements"
+write_section "6. Metadata Data"
 
 echo "Checking for work items, pull requests, and boards..." | tee -a "$REPORT_FILE"
 
@@ -383,21 +374,11 @@ done
 echo "Total Work Items: $total_work_items" | tee -a "$REPORT_FILE"
 echo "Total Pull Requests: $total_pull_requests" | tee -a "$REPORT_FILE"
 echo "Projects with Boards/Teams: $projects_with_boards" | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-
-if [ "$total_work_items" -gt 0 ] || [ "$total_pull_requests" -gt 0 ] || [ "$projects_with_boards" -gt 0 ]; then
-    echo "RECOMMENDATION: Metadata migration is recommended" | tee -a "$REPORT_FILE"
-    echo "  - Work Items should be considered for migration to GitHub Issues" | tee -a "$REPORT_FILE"
-    echo "  - Pull Request history may need to be archived or migrated" | tee -a "$REPORT_FILE"
-    echo "  - Board configurations should be replicated in GitHub Projects" | tee -a "$REPORT_FILE"
-else
-    echo "No significant metadata found - basic migration sufficient" | tee -a "$REPORT_FILE"
-fi
 
 # ========================================
-# 7. PIPELINE MIGRATION NEEDS
+# 7. PIPELINE DATA
 # ========================================
-write_section "7. Pipeline Migration Requirements"
+write_section "7. Pipeline Data"
 
 echo "Checking for existing pipelines..." | tee -a "$REPORT_FILE"
 
@@ -427,16 +408,6 @@ done
 
 echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
 echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-
-if [ "$total_pipelines" -gt 0 ]; then
-    echo "RECOMMENDATION: Pipeline migration is required" | tee -a "$REPORT_FILE"
-    echo "  - Azure Pipelines YAML files should be converted to GitHub Actions" | tee -a "$REPORT_FILE"
-    echo "  - Review pipeline triggers and scheduled runs" | tee -a "$REPORT_FILE"
-    echo "  - Verify service connections and secrets migration" | tee -a "$REPORT_FILE"
-else
-    echo "No pipelines found - no workflow migration needed" | tee -a "$REPORT_FILE"
-fi
 
 # ========================================
 # 8. CUSTOM INTEGRATIONS
@@ -477,17 +448,12 @@ if [ -f "$TEMP_DATA_DIR/hook_types.txt" ]; then
     sort "$TEMP_DATA_DIR/hook_types.txt" | uniq | while read -r hook; do
         echo "  - $hook" | tee -a "$REPORT_FILE"
     done
-    echo "" | tee -a "$REPORT_FILE"
-    echo "RECOMMENDATION: These integrations need to be recreated in GitHub" | tee -a "$REPORT_FILE"
-    echo "  - Review each service hook and identify GitHub equivalent (webhooks, apps, or actions)" | tee -a "$REPORT_FILE"
-else
-    echo "No custom integrations found" | tee -a "$REPORT_FILE"
 fi
 
 # ========================================
-# 9. USER MIGRATION
+# 9. USER DATA
 # ========================================
-write_section "9. User Migration Requirements"
+write_section "9. User Data"
 
 echo "Collecting user information..." | tee -a "$REPORT_FILE"
 
@@ -505,12 +471,6 @@ if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq 
         echo "  - $level: $count users" | tee -a "$REPORT_FILE"
     done
     
-    echo "" | tee -a "$REPORT_FILE"
-    echo "RECOMMENDATION: Plan user migration and GitHub seat allocation" | tee -a "$REPORT_FILE"
-    echo "  - Map Azure DevOps users to GitHub accounts" | tee -a "$REPORT_FILE"
-    echo "  - Determine appropriate GitHub team structure" | tee -a "$REPORT_FILE"
-    echo "  - Consider GitHub seat licenses needed" | tee -a "$REPORT_FILE"
-    
     # Export user list to CSV
     USER_CSV="$TEMP_DATA_DIR/users.csv"
     echo "displayName,emailAddress,accessLevel,lastAccessDate" > "$USER_CSV"
@@ -521,54 +481,20 @@ if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq 
 fi
 
 # ========================================
-# SUMMARY AND RECOMMENDATIONS
+# SUMMARY
 # ========================================
-write_section "Migration Scoping Summary"
+write_section "Migration Data Summary"
 
-echo "KEY FINDINGS:" | tee -a "$REPORT_FILE"
-echo "  • Repositories to migrate: $total_repos" | tee -a "$REPORT_FILE"
-echo "  • Large repositories (>1GB): $large_repos" | tee -a "$REPORT_FILE"
-echo "  • Pipelines requiring conversion: $total_pipelines" | tee -a "$REPORT_FILE"
-echo "  • Users to migrate: $user_count" | tee -a "$REPORT_FILE"
-echo "  • Service hooks/integrations: $total_hooks" | tee -a "$REPORT_FILE"
-echo "  • Work items: $total_work_items" | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-
-echo "MIGRATION COMPLEXITY ASSESSMENT:" | tee -a "$REPORT_FILE"
-complexity_score=0
-
-if [ "$large_repos" -gt 0 ]; then
-    complexity_score=$((complexity_score + 2))
-    echo "  ⚠ Large repositories present - will require careful migration planning" | tee -a "$REPORT_FILE"
-fi
-
-if [ "$total_pipelines" -gt 10 ]; then
-    complexity_score=$((complexity_score + 2))
-    echo "  ⚠ Significant pipeline migration required" | tee -a "$REPORT_FILE"
-elif [ "$total_pipelines" -gt 0 ]; then
-    complexity_score=$((complexity_score + 1))
-    echo "  ⚠ Moderate pipeline migration required" | tee -a "$REPORT_FILE"
-fi
-
-if [ "$total_hooks" -gt 0 ]; then
-    complexity_score=$((complexity_score + 1))
-    echo "  ⚠ Custom integrations need recreation" | tee -a "$REPORT_FILE"
-fi
-
-if [ "$total_work_items" -gt 100 ]; then
-    complexity_score=$((complexity_score + 1))
-    echo "  ⚠ Significant metadata migration recommended" | tee -a "$REPORT_FILE"
-fi
-
-echo "" | tee -a "$REPORT_FILE"
-
-if [ "$complexity_score" -le 2 ]; then
-    echo "Overall Complexity: LOW - Straightforward migration" | tee -a "$REPORT_FILE"
-elif [ "$complexity_score" -le 4 ]; then
-    echo "Overall Complexity: MEDIUM - Plan for 2-4 weeks migration window" | tee -a "$REPORT_FILE"
-else
-    echo "Overall Complexity: HIGH - Plan for 4-8 weeks migration window" | tee -a "$REPORT_FILE"
-fi
+echo "Total Projects: $project_count" | tee -a "$REPORT_FILE"
+echo "Total Repositories: $total_repos" | tee -a "$REPORT_FILE"
+echo "Large Repositories (>1GB): $large_repos" | tee -a "$REPORT_FILE"
+echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
+echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
+echo "Total Users: $user_count" | tee -a "$REPORT_FILE"
+echo "Total Service Hooks: $total_hooks" | tee -a "$REPORT_FILE"
+echo "Total Work Items: $total_work_items" | tee -a "$REPORT_FILE"
+echo "Total Pull Requests: $total_pull_requests" | tee -a "$REPORT_FILE"
+echo "Projects with Boards/Teams: $projects_with_boards" | tee -a "$REPORT_FILE"
 
 echo "" | tee -a "$REPORT_FILE"
 echo "========================================" | tee -a "$REPORT_FILE"
