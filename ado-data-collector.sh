@@ -11,8 +11,8 @@
 # -------- CONFIGURATION --------
 # Set DEBUG=1 to see detailed API calls, DEBUG=0 for cleaner output
 DEBUG=${DEBUG:-0}
-ORG="your-org-name"
-PAT="your-personal-access-token"
+ORG="org-name"
+PAT="pat-token-here"
 ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
@@ -25,7 +25,7 @@ mkdir -p "$TEMP_DATA_DIR"
 trap 'rm -rf "$TEMP_DATA_DIR"' EXIT INT TERM
 
 # API version
-API_VERSION="7.1-preview.1"
+API_VERSION="7.1"
 
 # -------- HELPER FUNCTIONS --------
 
@@ -131,9 +131,12 @@ if [ "$projects_response" = "API_ERROR" ] || ! echo "$projects_response" | jq em
     exit 1
 fi
 
-# Use mapfile/readarray to handle project names with spaces/special characters
+# Use while-read loop to handle project names with spaces/special characters (Bash 3.2 compatible)
 # Filter out null and empty values
-mapfile -t projects < <(echo "$projects_response" | jq -r '.value[].name | select(. != null and . != "")')
+projects=()
+while IFS= read -r project; do
+    [ -n "$project" ] && projects+=("$project")
+done < <(echo "$projects_response" | jq -r '.value[].name | select(. != null and . != "")')
 
 # Check if we actually have any projects
 if [ ${#projects[@]} -eq 0 ] || [ -z "${projects[0]:-}" ]; then
@@ -200,10 +203,10 @@ write_section "2. Repositories Over 1GB"
 echo "Analyzing repository sizes..." | tee -a "$REPORT_FILE"
 
 large_repos=0
-ONE_GB=1073741824  # 1GB in bytes
+ONE_GB_KB=1048576  # 1GB in kilobytes (Azure DevOps API returns size in KB)
 
 if [ -f "$REPO_DETAILS_FILE" ]; then
-    large_repos_json=$(jq "[.[] | select(.size != null and (.size | tonumber) > $ONE_GB)]" "$REPO_DETAILS_FILE")
+    large_repos_json=$(jq "[.[] | select(.size != null and (.size | tonumber) > $ONE_GB_KB)]" "$REPO_DETAILS_FILE")
     large_repos=$(echo "$large_repos_json" | jq 'length')
     
     echo "Repositories over 1GB: $large_repos" | tee -a "$REPORT_FILE"
@@ -211,7 +214,7 @@ if [ -f "$REPO_DETAILS_FILE" ]; then
     if [ "$large_repos" -gt 0 ]; then
         echo "" | tee -a "$REPORT_FILE"
         echo "Large Repository Details:" | tee -a "$REPORT_FILE"
-        echo "$large_repos_json" | jq -r '.[] | "\(.project)/\(.name): \((.size/1024/1024/1024*100|floor)/100)GB"' | tee -a "$REPORT_FILE"
+        echo "$large_repos_json" | jq -r '.[] | "\(.project)/\(.name): \((.size/1024*100|floor)/100)GB"' | tee -a "$REPORT_FILE"
     fi
 else
     echo "WARNING: Could not analyze repository sizes - no data available" | tee -a "$REPORT_FILE"
@@ -226,7 +229,8 @@ if [ -f "$REPO_DETAILS_FILE" ]; then
     # Check if any repos have size data
     has_size=$(jq 'any(.size != null)' "$REPO_DETAILS_FILE")
     if [ "$has_size" = "true" ]; then
-        largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024/1024/1024*100|floor)/100)GB"' "$REPO_DETAILS_FILE")
+        # Size is in KB, so divide by 1024 to get MB, then by 1024 to get GB
+        largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024*100|floor)/100)GB"' "$REPO_DETAILS_FILE")
         echo "Largest Repository: $largest_repo" | tee -a "$REPORT_FILE"
     else
         echo "No repository size data available" | tee -a "$REPORT_FILE"
@@ -350,8 +354,11 @@ for project in "${projects[@]}"; do
     
     # Check for pull requests
     if [ -f "$REPO_DETAILS_FILE" ]; then
-        # Use mapfile to safely handle repo IDs, use jq --arg for safe string passing
-        mapfile -t project_repos < <(jq -r --arg proj "$project" '.[] | select(.project == $proj) | .id' "$REPO_DETAILS_FILE")
+        # Use while-read loop to safely handle repo IDs (Bash 3.2 compatible), use jq --arg for safe string passing
+        project_repos=()
+        while IFS= read -r repo_id; do
+            [ -n "$repo_id" ] && project_repos+=("$repo_id")
+        done < <(jq -r --arg proj "$project" '.[] | select(.project == $proj) | .id' "$REPO_DETAILS_FILE")
         
         # Only loop if we actually have repo IDs (skip empty array)
         if [ ${#project_repos[@]} -gt 0 ] && [ -n "${project_repos[0]}" ]; then
@@ -457,8 +464,8 @@ write_section "9. User Data"
 
 echo "Collecting user information..." | tee -a "$REPORT_FILE"
 
-# Get organization users
-users=$(call_api "$ORG_URL/_apis/userentitlements?api-version=$API_VERSION")
+# Get organization users (requires vsaex subdomain)
+users=$(call_api "https://vsaex.dev.azure.com/$ORG/_apis/userentitlements?api-version=$API_VERSION")
 user_count=$(safe_jq_count "$users" '.totalCount')
 
 echo "Total Users in Organization: $user_count" | tee -a "$REPORT_FILE"
@@ -467,7 +474,7 @@ echo "" | tee -a "$REPORT_FILE"
 # Get user access levels
 if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq empty 2>/dev/null; then
     echo "User Access Level Breakdown:" | tee -a "$REPORT_FILE"
-    echo "$users" | jq -r '.members[].accessLevel.accountLicenseType' 2>/dev/null | sort | uniq -c | while read -r count level; do
+    echo "$users" | jq -r '.items[].accessLevel.accountLicenseType' 2>/dev/null | sort | uniq -c | while read -r count level; do
         echo "  - $level: $count users" | tee -a "$REPORT_FILE"
     done
     
@@ -475,7 +482,7 @@ if [ "$user_count" -gt 0 ] && [ "$users" != "API_ERROR" ] && echo "$users" | jq 
     USER_CSV="$TEMP_DATA_DIR/users.csv"
     echo "displayName,emailAddress,accessLevel,lastAccessDate" > "$USER_CSV"
     # Use jq @csv to properly escape fields with commas, quotes, and newlines
-    echo "$users" | jq -r '.members[] | [.user.displayName, .user.mailAddress, .accessLevel.accountLicenseType, .lastAccessedDate] | @csv' 2>/dev/null >> "$USER_CSV"
+    echo "$users" | jq -r '.items[] | [.user.displayName, .user.mailAddress, .accessLevel.accountLicenseType, .lastAccessedDate] | @csv' 2>/dev/null >> "$USER_CSV"
     echo "" | tee -a "$REPORT_FILE"
     echo "User details exported to: $USER_CSV" | tee -a "$REPORT_FILE"
 fi
