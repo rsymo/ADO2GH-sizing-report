@@ -11,6 +11,8 @@
 # -------- CONFIGURATION --------
 # Set DEBUG=1 to see detailed API calls, DEBUG=0 for cleaner output
 DEBUG=${DEBUG:-0}
+# Set SCAN_LARGE_FILES=1 to clone repos and scan for large files (slower but accurate)
+SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}
 ORG="org-name"
 PAT="pat-token-here"
 ORG_URL="https://dev.azure.com/$ORG"
@@ -196,11 +198,11 @@ echo "Total Projects: $project_count" | tee -a "$REPORT_FILE"
 echo "Total Repositories: $total_repos" | tee -a "$REPORT_FILE"
 
 # ========================================
-# 2. REPOSITORIES OVER 1GB
+# 2. REPOSITORIES OVER 1GB (API-REPORTED SIZE)
 # ========================================
-write_section "2. Repositories Over 1GB"
+write_section "2. Repositories Over 1GB (API-Reported Size)"
 
-echo "Analyzing repository sizes..." | tee -a "$REPORT_FILE"
+echo "Analyzing repository sizes from Azure DevOps API..." | tee -a "$REPORT_FILE"
 
 large_repos=0
 ONE_GB_KB=1048576  # 1GB in kilobytes (Azure DevOps API returns size in KB)
@@ -214,23 +216,23 @@ if [ -f "$REPO_DETAILS_FILE" ]; then
     if [ "$large_repos" -gt 0 ]; then
         echo "" | tee -a "$REPORT_FILE"
         echo "Large Repository Details:" | tee -a "$REPORT_FILE"
-        echo "$large_repos_json" | jq -r '.[] | "\(.project)/\(.name): \((.size/1024*100|floor)/100)GB"' | tee -a "$REPORT_FILE"
+        echo "$large_repos_json" | jq -r '.[] | "\(.project)/\(.name): \((.size/1024/1024*100|floor)/100)GB"' | tee -a "$REPORT_FILE"
     fi
 else
     echo "WARNING: Could not analyze repository sizes - no data available" | tee -a "$REPORT_FILE"
 fi
 
 # ========================================
-# 3. LARGEST REPOSITORY
+# 3. LARGEST REPOSITORY (API-REPORTED SIZE)
 # ========================================
-write_section "3. Largest Repository"
+write_section "3. Largest Repository (API-Reported Size)"
 
 if [ -f "$REPO_DETAILS_FILE" ]; then
     # Check if any repos have size data
     has_size=$(jq 'any(.size != null)' "$REPO_DETAILS_FILE")
     if [ "$has_size" = "true" ]; then
-        # Size is in KB, so divide by 1024 to get MB, then by 1024 to get GB
-        largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024*100|floor)/100)GB"' "$REPO_DETAILS_FILE")
+        # Size is in KB, so divide by 1024 to get MB
+        largest_repo=$(jq -r 'max_by(.size // 0) | "\(.project)/\(.name): \((.size/1024*100|floor)/100)MB"' "$REPO_DETAILS_FILE")
         echo "Largest Repository: $largest_repo" | tee -a "$REPORT_FILE"
     else
         echo "No repository size data available" | tee -a "$REPORT_FILE"
@@ -317,16 +319,123 @@ else
 fi
 
 # ========================================
-# 5. BINARY/LARGE FILES CHECK
+# 5. LARGE FILES SCAN (INDIVIDUAL FILE SIZES)
 # ========================================
-write_section "5. Binary and Large Files"
+write_section "5. Large Files Scan (Individual File Sizes)"
 
-echo "NOTE: Binary/large file detection requires manual inspection of repository settings." | tee -a "$REPORT_FILE"
-echo "" | tee -a "$REPORT_FILE"
-
-if [ "$large_repos" -gt 0 ]; then
-    echo "Repositories over 1GB:" | tee -a "$REPORT_FILE"
-    echo "$large_repos_json" | jq -r '.[] | "  - \(.project)/\(.name)"' | tee -a "$REPORT_FILE"
+# Check if Git is available and user opted in for scanning
+if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
+    echo "Scanning repositories for large files (>50MB)..." | tee -a "$REPORT_FILE"
+    echo "This will clone repositories and may take some time..." | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    
+    # Size threshold: 50MB in bytes
+    LARGE_FILE_THRESHOLD_BYTES=52428800  # 50MB
+    total_large_files=0
+    repos_with_large_files=0
+    
+    # Create temp file for large files (use absolute path)
+    LARGE_FILES_LIST="$PWD/$TEMP_DATA_DIR/large_files.txt"
+    > "$LARGE_FILES_LIST"
+    
+    # Save original directory
+    ORIGINAL_DIR="$PWD"
+    
+    if [ -f "$REPO_DETAILS_FILE" ]; then
+        while read -r repo; do
+            project=$(echo "$repo" | jq -r '.project')
+            repo_name=$(echo "$repo" | jq -r '.name')
+            
+            echo "  Scanning $project/$repo_name..." | tee -a "$REPORT_FILE"
+            
+            # URL encode project name for clone URL
+            project_encoded=$(url_encode "$project")
+            
+            # Create temp directory for this repo
+            repo_temp_dir="$ORIGINAL_DIR/$TEMP_DATA_DIR/scan_${repo_name}_$$"
+            mkdir -p "$repo_temp_dir"
+            cd "$repo_temp_dir"
+            
+            # Clone as bare repository (faster, includes all history)
+            git clone --bare --quiet "https://$PAT@dev.azure.com/$ORG/$project_encoded/_git/$repo_name" repo.git 2>/dev/null
+            
+            if [ $? -eq 0 ] && [ -d "repo.git" ]; then
+                cd repo.git
+                
+                # Find all large blobs in Git history
+                large_blobs=$(git rev-list --objects --all | \
+                    git cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(rest)' | \
+                    awk -v threshold=$LARGE_FILE_THRESHOLD_BYTES '$1 == "blob" && $3 > threshold {printf "%.2f|%s\n", $3/1024/1024, $4}' | \
+                    sort -t'|' -k1 -rn)
+                
+                if [ -n "$large_blobs" ]; then
+                    file_count=$(echo "$large_blobs" | wc -l | tr -d ' ')
+                    repos_with_large_files=$((repos_with_large_files + 1))
+                    total_large_files=$((total_large_files + file_count))
+                    
+                    echo "    Found $file_count large file(s):" | tee -a "$REPORT_FILE"
+                    echo "$large_blobs" | while IFS='|' read -r size_mb path; do
+                        echo "      - $path (${size_mb}MB)" | tee -a "$REPORT_FILE"
+                        echo "$project/$repo_name|$path|${size_mb}MB" >> "$LARGE_FILES_LIST"
+                    done
+                else
+                    echo "    No large files found" | tee -a "$REPORT_FILE"
+                fi
+                
+                cd "$ORIGINAL_DIR" > /dev/null
+            else
+                echo "    WARNING: Failed to clone repository" | tee -a "$REPORT_FILE"
+            fi
+            
+            # Cleanup this repo's temp directory
+            cd "$ORIGINAL_DIR" > /dev/null
+            rm -rf "$repo_temp_dir"
+            
+        done < <(jq -c '.[]' "$REPO_DETAILS_FILE")
+    fi
+    
+    echo "" | tee -a "$REPORT_FILE"
+    echo "Total Large Files (>50MB): $total_large_files" | tee -a "$REPORT_FILE"
+    echo "Repositories with Large Files: $repos_with_large_files" | tee -a "$REPORT_FILE"
+    
+    if [ "$total_large_files" -gt 0 ]; then
+        echo "" | tee -a "$REPORT_FILE"
+        echo "NOTE: GitHub warns about files >50MB and blocks files >100MB." | tee -a "$REPORT_FILE"
+        echo "Consider using Git LFS for these files during migration." | tee -a "$REPORT_FILE"
+    fi
+    
+else
+    # Original API limitation message
+    if [ "$SCAN_LARGE_FILES" = "1" ] && ! command -v git &> /dev/null; then
+        echo "WARNING: SCAN_LARGE_FILES=1 but Git is not installed" | tee -a "$REPORT_FILE"
+        echo "" | tee -a "$REPORT_FILE"
+    fi
+    
+    echo "NOTE: Azure DevOps API does not provide file size information via REST API." | tee -a "$REPORT_FILE"
+    echo "To detect large files (>50MB), run this script with: SCAN_LARGE_FILES=1 ./ado-data-collector.sh" | tee -a "$REPORT_FILE"
+    echo "This will clone repositories and scan for large files (requires Git installed)." | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    echo "Alternative methods:" | tee -a "$REPORT_FILE"
+    echo "  1. Clone repositories locally and run: git ls-files -z | xargs -0 du -h | sort -rh | head" | tee -a "$REPORT_FILE"
+    echo "  2. Use Azure Repos web interface to browse repository contents" | tee -a "$REPORT_FILE"
+    echo "  3. Check if Git LFS is already configured: git lfs ls-files" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    echo "GitHub migration considerations:" | tee -a "$REPORT_FILE"
+    echo "  - GitHub warns about files >50MB" | tee -a "$REPORT_FILE"
+    echo "  - GitHub blocks files >100MB" | tee -a "$REPORT_FILE"
+    echo "  - Consider using Git LFS for binary files and large assets" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    
+    # Initialize variables for summary
+    total_large_files=0
+    repos_with_large_files=0
+    
+    if [ "$large_repos" -gt 0 ]; then
+        echo "Repositories over 1GB (likely to contain large files):" | tee -a "$REPORT_FILE"
+        echo "$large_repos_json" | jq -r '.[] | "  - \(.project)/\(.name)"' | tee -a "$REPORT_FILE"
+        echo "" | tee -a "$REPORT_FILE"
+        echo "Recommend manual inspection of these repositories for large files." | tee -a "$REPORT_FILE"
+    fi
 fi
 
 # ========================================
@@ -495,6 +604,8 @@ write_section "Migration Data Summary"
 echo "Total Projects: $project_count" | tee -a "$REPORT_FILE"
 echo "Total Repositories: $total_repos" | tee -a "$REPORT_FILE"
 echo "Large Repositories (>1GB): $large_repos" | tee -a "$REPORT_FILE"
+echo "Large Files (>50MB): $total_large_files" | tee -a "$REPORT_FILE"
+echo "Repositories with Large Files: $repos_with_large_files" | tee -a "$REPORT_FILE"
 echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
 echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
 echo "Total Users: $user_count" | tee -a "$REPORT_FILE"

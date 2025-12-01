@@ -24,6 +24,18 @@ Before running the script, ensure you have the following installed:
 
 2. **curl** (usually pre-installed on most systems)
 
+3. **git** (required only if using `SCAN_LARGE_FILES=1` option):
+   ```bash
+   # macOS
+   brew install git
+   
+   # Linux (Ubuntu/Debian)
+   sudo apt-get install git
+   
+   # Linux (RHEL/CentOS)
+   sudo yum install git
+   ```
+
 ## Setup Instructions
 
 ### Step 1: Generate a Personal Access Token (PAT)
@@ -51,7 +63,9 @@ Before running the script, ensure you have the following installed:
 3. Update the configuration section at the top:
    ```bash
    # -------- CONFIGURATION --------
-   ORG="your-org-name"              # Replace with your Azure DevOps organization name
+   DEBUG=${DEBUG:-0}                 # Set to 1 for debug output
+   SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}  # Set to 1 to scan for large files
+   ORG="your-org-name"               # Replace with your Azure DevOps organization name
    PAT="your-personal-access-token"  # Replace with the PAT you just created
    ```
 
@@ -64,11 +78,17 @@ chmod +x ado-data-collector.sh
 ### Step 4: Run the Script
 
 ```bash
-# Run with default (clean) output
+# Run with default mode (API-only, faster)
 ./ado-data-collector.sh
+
+# Run with large file scanning (clones repos, slower but detects individual large files)
+SCAN_LARGE_FILES=1 ./ado-data-collector.sh
 
 # Run with debug output to see API calls
 DEBUG=1 ./ado-data-collector.sh
+
+# Combine options
+DEBUG=1 SCAN_LARGE_FILES=1 ./ado-data-collector.sh
 ```
 
 The script will:
@@ -77,7 +97,9 @@ The script will:
 - Generate a timestamped report file: `ado-data-report-YYYYMMDD-HHMMSS-XXXXX.txt`
 - Automatically clean up temporary data on completion or interruption
 
-**Expected Runtime**: 5-15 minutes depending on organization size
+**Expected Runtime**: 
+- **Default mode**: 5-15 minutes depending on organization size
+- **With SCAN_LARGE_FILES=1**: 10-30 minutes (clones repositories for file scanning)
 
 ## Features
 
@@ -100,19 +122,24 @@ The generated report includes factual data only, without assessments or recommen
 ### 1. **Repository Count**
    - Total number of projects and repositories
 
-### 2. **Large Repositories (>1GB)**
-   - List of repositories exceeding 1GB with sizes
+### 2. **Repositories Over 1GB (API-Reported Size)**
+   - List of repositories exceeding 1GB based on Azure DevOps API size metric
+   - Sizes shown in GB
 
-### 3. **Largest Repository**
-   - Repository with the largest size
+### 3. **Largest Repository (API-Reported Size)**
+   - Repository with the largest API-reported size
+   - Size shown in MB or GB
 
 ### 4. **Oldest Repository**
    - Repository with the earliest commit
    - First commit date and ID
 
-### 5. **Binary/Large Files**
-   - Note about manual inspection requirement
-   - List of repositories over 1GB
+### 5. **Large Files Scan (Individual File Sizes)**
+   - **Default mode**: Shows instructions for manual inspection
+   - **With SCAN_LARGE_FILES=1**: Automatically scans Git history for files >50MB
+     - Lists all large files with exact sizes
+     - Includes files from entire Git history (even if deleted)
+     - Provides GitHub migration guidance (50MB warning, 100MB block)
 
 ### 6. **Metadata Data**
    - Work items count
@@ -134,6 +161,7 @@ The generated report includes factual data only, without assessments or recommen
 
 ### 10. **Migration Data Summary**
    - Consolidated statistics from all sections
+   - Includes large file counts when SCAN_LARGE_FILES=1
 
 ## Output Files
 
@@ -205,6 +233,27 @@ Enable debug output to see all API calls:
 DEBUG=1 ./ado-data-collector.sh
 ```
 
+### Large File Scanning
+Enable automatic large file detection (requires Git):
+```bash
+SCAN_LARGE_FILES=1 ./ado-data-collector.sh
+```
+
+**How it works:**
+- Clones each repository as a bare repository (faster, no working directory)
+- Scans entire Git object database for all blobs
+- Detects files >50MB anywhere in Git history
+- Identifies files even if they were deleted in later commits
+- Reports exact file sizes and paths
+
+**When to use:**
+- Planning GitHub migration (GitHub warns at 50MB, blocks at 100MB)
+- Identifying candidates for Git LFS conversion
+- Understanding true repository size vs API-reported size
+- Finding large files that may have been deleted but still bloat the repo
+
+**Performance note:** This mode is slower as it clones repositories, but provides accurate file-level analysis.
+
 ### Concurrent Execution
 The script is safe for concurrent execution:
 - Each run creates a unique temporary directory using process ID
@@ -216,6 +265,8 @@ Set configuration via environment variables instead of editing the script:
 ```bash
 export ORG="your-org-name"
 export PAT="your-pat-token"
+export SCAN_LARGE_FILES=1
+export DEBUG=1
 ./ado-data-collector.sh
 ```
 
