@@ -526,9 +526,75 @@ echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
 echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
 
 # ========================================
-# 8. CUSTOM INTEGRATIONS
+# 8. SECURITY SCANNING (ADVANCED SECURITY)
 # ========================================
-write_section "8. Custom Integrations (Service Hooks)"
+write_section "8. Security Scanning (Advanced Security)"
+
+echo "Checking for Azure DevOps Advanced Security alerts..." | tee -a "$REPORT_FILE"
+
+# Note: Advanced Security is a paid add-on feature in Azure DevOps
+# API: https://advsec.dev.azure.com/{org}/_apis/...
+# Requires Advanced Security license and specific scopes
+
+total_secret_alerts=0
+total_dependency_alerts=0
+total_code_alerts=0
+repos_with_alerts=0
+
+# Check if Advanced Security is enabled by testing the API
+advsec_test=$(call_api "https://advsec.dev.azure.com/$ORG/_apis/management/repositories?api-version=7.2-preview.1")
+
+if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/null; then
+    echo "Advanced Security is enabled for this organization" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    
+    # Get all repositories with Advanced Security enabled
+    advsec_repos=$(echo "$advsec_test" | jq -r '.value[] | select(.advSecEnabled == true) | .id')
+    
+    if [ -n "$advsec_repos" ]; then
+        while IFS= read -r repo_id; do
+            # Get alerts for this repository
+            alerts=$(call_api "https://advsec.dev.azure.com/$ORG/_apis/alert/repositories/$repo_id/alerts?api-version=7.2-preview.1")
+            
+            if [ "$alerts" != "API_ERROR" ] && echo "$alerts" | jq empty 2>/dev/null; then
+                # Count alerts by type
+                secret_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "secret")] | length')
+                dependency_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "dependency")] | length')
+                code_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "code")] | length')
+                
+                total_secret_alerts=$((total_secret_alerts + secret_count))
+                total_dependency_alerts=$((total_dependency_alerts + dependency_count))
+                total_code_alerts=$((total_code_alerts + code_count))
+                
+                if [ "$secret_count" -gt 0 ] || [ "$dependency_count" -gt 0 ] || [ "$code_count" -gt 0 ]; then
+                    repos_with_alerts=$((repos_with_alerts + 1))
+                fi
+            fi
+        done <<< "$advsec_repos"
+        
+        echo "Total Secret Scanning Alerts: $total_secret_alerts" | tee -a "$REPORT_FILE"
+        echo "Total Dependency Scanning Alerts: $total_dependency_alerts" | tee -a "$REPORT_FILE"
+        echo "Total Code Scanning Alerts: $total_code_alerts" | tee -a "$REPORT_FILE"
+        echo "Repositories with Security Alerts: $repos_with_alerts" | tee -a "$REPORT_FILE"
+    else
+        echo "Advanced Security enabled but no repositories configured" | tee -a "$REPORT_FILE"
+    fi
+else
+    echo "Advanced Security is NOT enabled for this organization" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    echo "NOTE: Azure DevOps Advanced Security is a paid add-on feature that includes:" | tee -a "$REPORT_FILE"
+    echo "  - Secret scanning (credentials, tokens, keys)" | tee -a "$REPORT_FILE"
+    echo "  - Dependency scanning (vulnerable packages)" | tee -a "$REPORT_FILE"
+    echo "  - Code scanning (security vulnerabilities)" | tee -a "$REPORT_FILE"
+    echo "" | tee -a "$REPORT_FILE"
+    echo "Alternative: Consider using third-party security scanning tools or" | tee -a "$REPORT_FILE"
+    echo "GitHub Advanced Security after migration." | tee -a "$REPORT_FILE"
+fi
+
+# ========================================
+# 9. CUSTOM INTEGRATIONS
+# ========================================
+write_section "9. Custom Integrations (Service Hooks)"
 
 echo "Checking for service hooks and integrations..." | tee -a "$REPORT_FILE"
 
@@ -567,9 +633,9 @@ if [ -f "$TEMP_DATA_DIR/hook_types.txt" ]; then
 fi
 
 # ========================================
-# 9. USER DATA
+# 10. USER DATA
 # ========================================
-write_section "9. User Data"
+write_section "10. User Data"
 
 echo "Collecting user information..." | tee -a "$REPORT_FILE"
 
@@ -608,6 +674,10 @@ echo "Large Files (>50MB): $total_large_files" | tee -a "$REPORT_FILE"
 echo "Repositories with Large Files: $repos_with_large_files" | tee -a "$REPORT_FILE"
 echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
 echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
+echo "Total Secret Scanning Alerts: $total_secret_alerts" | tee -a "$REPORT_FILE"
+echo "Total Dependency Scanning Alerts: $total_dependency_alerts" | tee -a "$REPORT_FILE"
+echo "Total Code Scanning Alerts: $total_code_alerts" | tee -a "$REPORT_FILE"
+echo "Repositories with Security Alerts: $repos_with_alerts" | tee -a "$REPORT_FILE"
 echo "Total Users: $user_count" | tee -a "$REPORT_FILE"
 echo "Total Service Hooks: $total_hooks" | tee -a "$REPORT_FILE"
 echo "Total Work Items: $total_work_items" | tee -a "$REPORT_FILE"

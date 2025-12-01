@@ -150,18 +150,28 @@ The generated report includes factual data only, without assessments or recommen
    - Total pipelines count
    - Repositories with pipelines
 
-### 8. **Custom Integrations**
+### 8. **Security Scanning (Advanced Security)**
+   - **If Advanced Security is enabled**: Reports on security alerts
+     - Secret scanning alerts (credentials, tokens, API keys)
+     - Dependency scanning alerts (vulnerable packages)
+     - Code scanning alerts (security vulnerabilities)
+     - Repositories with security alerts
+   - **If not enabled**: Provides information about the feature and alternatives
+   - Note: Azure DevOps Advanced Security is a paid add-on feature
+
+### 9. **Custom Integrations**
    - Service hooks count
    - Integration types found
 
-### 9. **User Data**
+### 10. **User Data**
    - Total user count
    - User access level breakdown
    - Exported user list (CSV format)
 
-### 10. **Migration Data Summary**
+### 11. **Migration Data Summary**
    - Consolidated statistics from all sections
    - Includes large file counts when SCAN_LARGE_FILES=1
+   - Includes security alert counts if Advanced Security is enabled
 
 ## Output Files
 
