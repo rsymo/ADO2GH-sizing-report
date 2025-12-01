@@ -117,7 +117,7 @@ The script will:
 
 ## Report Contents
 
-The generated report includes factual data only, without assessments or recommendations:
+The generated report includes factual data only, it does not make assessments or recommendations:
 
 ### 1. **Repository Count**
    - Total number of projects and repositories
