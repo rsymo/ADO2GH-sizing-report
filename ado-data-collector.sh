@@ -417,8 +417,12 @@ if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
             cd "$repo_temp_dir"
             
             # Clone as bare repository (faster, includes all history)
-            # Use Azure AD Bearer token with http.extraHeader for authentication
-            git -c http.extraHeader="Authorization: Bearer $ADO_TOKEN" clone --bare --quiet "https://dev.azure.com/$ORG/$project_encoded/_git/$repo_name" repo.git 2>/dev/null
+            # Use Azure AD Bearer token with http.extraHeader for authentication, securely via a temporary file
+            header_file="$repo_temp_dir/git_header.txt"
+            echo "Authorization: Bearer $ADO_TOKEN" > "$header_file"
+            chmod 600 "$header_file"
+            git -c http.extraHeader=@"$header_file" clone --bare --quiet "https://dev.azure.com/$ORG/$project_encoded/_git/$repo_name" repo.git 2>/dev/null
+            rm -f "$header_file"
             
             if [ $? -eq 0 ] && [ -d "repo.git" ]; then
                 cd repo.git
