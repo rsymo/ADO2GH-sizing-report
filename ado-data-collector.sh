@@ -5,6 +5,14 @@
 # ========================================
 # This script collects data from Azure DevOps organizations
 # for GitHub migration planning.
+#
+# Prerequisites:
+#   - Azure CLI installed and logged in (az login)
+#   - jq installed for JSON parsing
+#
+# Usage:
+#   az login
+#   ./ado-data-collector.sh
 
 # Note: set -e is NOT used to allow graceful error handling
 
@@ -13,8 +21,18 @@
 DEBUG=${DEBUG:-0}
 # Set SCAN_LARGE_FILES=1 to clone repos and scan for large files (slower but accurate)
 SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}
-ORG="org-name"
-PAT="pat-token-here"
+# Azure DevOps organization name
+ORG="${ORG:-}"
+if [ -z "$ORG" ]; then
+    echo "ERROR: ORG environment variable is not set"
+    echo "Please set it to your Azure DevOps organization name:"
+    echo "  export ORG=your-org-name"
+    echo "  ./ado-data-collector.sh"
+    echo ""
+    echo "Or set it inline:"
+    echo "  ORG=your-org-name ./ado-data-collector.sh"
+    exit 1
+fi
 ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
@@ -23,22 +41,91 @@ REPORT_FILE="ado-data-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
 TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
 
-# Set up cleanup trap to remove temp directory on exit (success or failure)
-trap 'rm -rf "$TEMP_DATA_DIR"' EXIT INT TERM
+# Set up cleanup trap to remove temp directory and secure files on exit (success or failure)
+# This ensures bearer tokens in curl config are always cleaned up
+cleanup() {
+    rm -rf "$TEMP_DATA_DIR"
+    # Explicitly remove curl config if it exists outside temp dir
+    [ -n "$CURL_CONFIG_FILE" ] && rm -f "$CURL_CONFIG_FILE" 2>/dev/null
+}
+trap cleanup EXIT INT TERM
 
 # API version
 API_VERSION="7.1"
 
+# -------- AUTHENTICATION --------
+# Get Azure AD Bearer token using Azure CLI
+# Azure DevOps resource ID: 499b84ac-1321-427f-aa17-267ca6975798
+
+echo "Authenticating with Azure AD..."
+
+if ! command -v az &> /dev/null; then
+    echo "ERROR: Azure CLI is not installed"
+    echo "Please install Azure CLI: https://docs.microsoft.com/cli/azure/install-azure-cli"
+    exit 1
+fi
+
+# Check if logged in
+if ! az account show &> /dev/null; then
+    echo "ERROR: Not logged in to Azure CLI"
+    echo "Please run: az login"
+    exit 1
+fi
+
+# Get Bearer token for Azure DevOps
+ADO_TOKEN=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>/dev/null)
+
+if [ -z "$ADO_TOKEN" ]; then
+    echo "ERROR: Failed to get Azure AD token for Azure DevOps"
+    echo "Please ensure you have access to Azure DevOps organization: $ORG"
+    exit 1
+fi
+
+echo "Authentication successful!"
+echo ""
+
 # -------- HELPER FUNCTIONS --------
 
+# Create a secure curl config file with authentication header
+# This prevents token exposure in process listings
+# Use mktemp for secure, unpredictable filename to prevent race conditions
+CURL_CONFIG_FILE=$(mktemp "$TEMP_DATA_DIR/curl_config.XXXXXX")
+chmod 600 "$CURL_CONFIG_FILE"  # Ensure restrictive permissions from the start
+
+create_curl_config() {
+    # Write headers to config file (already has 600 permissions from mktemp)
+    cat > "$CURL_CONFIG_FILE" << EOF
+header = "Authorization: Bearer $ADO_TOKEN"
+header = "Accept: application/json"
+EOF
+}
+
+# Initialize curl config on first call
+create_curl_config
+
+# Function to refresh Azure AD token for long-running operations
+# Tokens typically expire after 1 hour, so refresh before long operations
+refresh_token() {
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] Refreshing Azure AD token..." >&2
+    local new_token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>/dev/null)
+    if [ -n "$new_token" ]; then
+        ADO_TOKEN="$new_token"
+        # Recreate curl config with new token
+        create_curl_config
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] Token refreshed successfully" >&2
+    else
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] WARNING: Failed to refresh token, continuing with existing token" >&2
+    fi
+}
+
 # Function to make Azure DevOps API calls (GET requests)
+# Uses secure curl config file to avoid token exposure in process listings
 call_api() {
     local endpoint="$1"
     [ "$DEBUG" = "1" ] && echo "[DEBUG] GET: $endpoint" >&2
-    # Use -f to fail on HTTP errors, suppress all error output to avoid log noise
-    # Use -L to follow redirects, --max-time for timeout (30 seconds)
-    # --retry 2 for transient failures
-    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 -u ":$PAT" "$endpoint" 2>/dev/null || echo "API_ERROR"
+    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 \
+        --config "$CURL_CONFIG_FILE" \
+        "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
 
 # Function to make Azure DevOps API POST calls
@@ -46,7 +133,10 @@ call_api_post() {
     local endpoint="$1"
     local data="$2"
     [ "$DEBUG" = "1" ] && echo "[DEBUG] POST: $endpoint" >&2
-    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 -u ":$PAT" -H "Content-Type: application/json" -X POST -d "$data" "$endpoint" 2>/dev/null || echo "API_ERROR"
+    curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 \
+        --config "$CURL_CONFIG_FILE" \
+        -H "Content-Type: application/json" \
+        -X POST -d "$data" "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
 
 # Function to safely extract a numeric value from JSON.
@@ -102,18 +192,18 @@ echo "Organization: $ORG" | tee -a "$REPORT_FILE"
 echo "Generated: $(date)" | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
 
-# Validate PAT and organization access early
-echo "Validating authentication and organization access..." | tee -a "$REPORT_FILE"
+# Validate authentication and organization access early
+echo "Validating organization access..." | tee -a "$REPORT_FILE"
 validation_test=$(call_api "$ORG_URL/_apis/projects?%24top=1&api-version=$API_VERSION")
 if [ "$validation_test" = "API_ERROR" ]; then
-    echo "ERROR: Failed to authenticate with Azure DevOps" | tee -a "$REPORT_FILE"
+    echo "ERROR: Failed to access Azure DevOps organization" | tee -a "$REPORT_FILE"
     echo "Please verify:" | tee -a "$REPORT_FILE"
     echo "  1. Organization name is correct: $ORG" | tee -a "$REPORT_FILE"
-    echo "  2. PAT is valid and not expired" | tee -a "$REPORT_FILE"
-    echo "  3. PAT has 'Project and Team (Read)' scope" | tee -a "$REPORT_FILE"
+    echo "  2. You are logged in with 'az login'" | tee -a "$REPORT_FILE"
+    echo "  3. Your account has access to this organization" | tee -a "$REPORT_FILE"
     exit 1
 fi
-echo "Authentication successful!" | tee -a "$REPORT_FILE"
+echo "Organization access confirmed!" | tee -a "$REPORT_FILE"
 echo "" | tee -a "$REPORT_FILE"
 
 # ========================================
@@ -325,6 +415,9 @@ write_section "5. Large Files Scan (Individual File Sizes)"
 
 # Check if Git is available and user opted in for scanning
 if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
+    # Refresh token before long-running operation (cloning can take time)
+    refresh_token
+    
     echo "Scanning repositories for large files (>50MB)..." | tee -a "$REPORT_FILE"
     echo "This will clone repositories and may take some time..." | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
@@ -346,7 +439,7 @@ if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
             project=$(echo "$repo" | jq -r '.project')
             repo_name=$(echo "$repo" | jq -r '.name')
             
-            echo "  Scanning $project/$repo_name..." | tee -a "$REPORT_FILE"
+            [ "$DEBUG" = "1" ] && echo "  Scanning $project/$repo_name..." | tee -a "$REPORT_FILE"
             
             # URL encode project name for clone URL
             project_encoded=$(url_encode "$project")
@@ -357,7 +450,12 @@ if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
             cd "$repo_temp_dir"
             
             # Clone as bare repository (faster, includes all history)
-            git clone --bare --quiet "https://$PAT@dev.azure.com/$ORG/$project_encoded/_git/$repo_name" repo.git 2>/dev/null
+            # Use Azure AD Bearer token with http.extraHeader for authentication, securely via a temporary file
+            header_file="$repo_temp_dir/git_header.txt"
+            echo "Authorization: Bearer $ADO_TOKEN" > "$header_file"
+            chmod 600 "$header_file"
+            git -c http.extraHeader=@"$header_file" clone --bare --quiet "https://dev.azure.com/$ORG/$project_encoded/_git/$repo_name" repo.git 2>/dev/null
+            rm -f "$header_file"
             
             if [ $? -eq 0 ] && [ -d "repo.git" ]; then
                 cd repo.git
@@ -450,7 +548,7 @@ total_pull_requests=0
 projects_with_boards=0
 
 for project in "${projects[@]}"; do
-    echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
@@ -502,7 +600,7 @@ total_pipelines=0
 repos_with_pipelines=0
 
 for project in "${projects[@]}"; do
-    echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
@@ -534,7 +632,7 @@ echo "Checking for Azure DevOps Advanced Security alerts..." | tee -a "$REPORT_F
 
 # Note: Advanced Security is a paid add-on feature in Azure DevOps
 # API: https://advsec.dev.azure.com/{org}/_apis/...
-# Requires Advanced Security license and specific scopes
+# Uses the same Azure AD Bearer token for authentication
 
 total_secret_alerts=0
 total_dependency_alerts=0
@@ -542,25 +640,63 @@ total_code_alerts=0
 repos_with_alerts=0
 
 # Check if Advanced Security is enabled by testing the API
-advsec_test=$(call_api "https://advsec.dev.azure.com/$ORG/_apis/management/repositories?api-version=7.2-preview.1")
+# Note: Using call_api with Bearer token (same auth as all other APIs)
+advsec_test=$(call_api "https://advsec.dev.azure.com/$ORG/_apis/management/enablement?api-version=7.2-preview.1")
 
 if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/null; then
     echo "Advanced Security is enabled for this organization" | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
     
-    # Get all repositories with Advanced Security enabled
-    advsec_repos=$(echo "$advsec_test" | jq -r '.value[] | select(.advSecEnabled == true) | .id')
-    
-    if [ -n "$advsec_repos" ]; then
-        while IFS= read -r repo_id; do
-            # Get alerts for this repository
-            alerts=$(call_api "https://advsec.dev.azure.com/$ORG/_apis/alert/repositories/$repo_id/alerts?api-version=7.2-preview.1")
-            
-            if [ "$alerts" != "API_ERROR" ] && echo "$alerts" | jq empty 2>/dev/null; then
-                # Count alerts by type
-                secret_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "secret")] | length')
-                dependency_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "dependency")] | length')
-                code_count=$(echo "$alerts" | jq '[.value[] | select(.alertType == "code")] | length')
+    # Iterate through all projects and their repositories
+    for project in "${projects[@]}"; do
+        [ "$DEBUG" = "1" ] && echo "  Checking Advanced Security for project: $project" | tee -a "$REPORT_FILE"
+        
+        # URL encode project name
+        project_encoded=$(url_encode "$project")
+        
+        # Get repositories for this project from the cached repo details
+        if [ -f "$REPO_DETAILS_FILE" ]; then
+            while IFS= read -r repo_line; do
+                repo_name=$(echo "$repo_line" | jq -r '.name')
+                repo_id=$(echo "$repo_line" | jq -r '.id')
+                
+                [ -z "$repo_id" ] || [ "$repo_id" = "null" ] && continue
+                
+                echo "    Checking repo: $repo_name ($repo_id)" | tee -a "$REPORT_FILE"
+                
+                # Query each alert type separately using criteria.alertType filter
+                # alertType values: 1=dependency, 2=secret, 3=code
+                # criteria.states=1 means active alerts only
+                # 
+                # Note on confidence levels:
+                # - Secret alerts (type 2) use confidence levels (High, Medium, Low, Other) because they use ML-based detection
+                # - Dependency alerts (type 1) don't use confidence levels; they're based on CVE databases (deterministic)
+                # - Code alerts (type 3) use severity levels, not confidence levels
+                
+                # Secret alerts (alertType=2) - include all confidence levels for comprehensive results
+                secret_alerts=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/alert/repositories/$repo_id/alerts?criteria.alertType=2&criteria.states=1&criteria.confidenceLevels=High&criteria.confidenceLevels=Medium&criteria.confidenceLevels=Low&criteria.confidenceLevels=Other&api-version=7.2-preview.1")
+                if [ "$secret_alerts" != "API_ERROR" ] && echo "$secret_alerts" | jq empty 2>/dev/null; then
+                    secret_count=$(echo "$secret_alerts" | jq '.count // 0' 2>/dev/null || echo "0")
+                    [ "$DEBUG" = "1" ] && echo "[DEBUG] Secret alerts response: $secret_alerts" >&2
+                else
+                    secret_count=0
+                fi
+                
+                # Dependency alerts (alertType=1)
+                dependency_alerts=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/alert/repositories/$repo_id/alerts?criteria.alertType=1&criteria.states=1&api-version=7.2-preview.1")
+                if [ "$dependency_alerts" != "API_ERROR" ] && echo "$dependency_alerts" | jq empty 2>/dev/null; then
+                    dependency_count=$(echo "$dependency_alerts" | jq '.count // 0' 2>/dev/null || echo "0")
+                else
+                    dependency_count=0
+                fi
+                
+                # Code scanning alerts (alertType=3)
+                code_alerts=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/alert/repositories/$repo_id/alerts?criteria.alertType=3&criteria.states=1&api-version=7.2-preview.1")
+                if [ "$code_alerts" != "API_ERROR" ] && echo "$code_alerts" | jq empty 2>/dev/null; then
+                    code_count=$(echo "$code_alerts" | jq '.count // 0' 2>/dev/null || echo "0")
+                else
+                    code_count=0
+                fi
                 
                 total_secret_alerts=$((total_secret_alerts + secret_count))
                 total_dependency_alerts=$((total_dependency_alerts + dependency_count))
@@ -568,17 +704,17 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                 
                 if [ "$secret_count" -gt 0 ] || [ "$dependency_count" -gt 0 ] || [ "$code_count" -gt 0 ]; then
                     repos_with_alerts=$((repos_with_alerts + 1))
+                    echo "      Found: $secret_count secret, $dependency_count dependency, $code_count code alerts" | tee -a "$REPORT_FILE"
                 fi
-            fi
-        done <<< "$advsec_repos"
-        
-        echo "Total Secret Scanning Alerts: $total_secret_alerts" | tee -a "$REPORT_FILE"
-        echo "Total Dependency Scanning Alerts: $total_dependency_alerts" | tee -a "$REPORT_FILE"
-        echo "Total Code Scanning Alerts: $total_code_alerts" | tee -a "$REPORT_FILE"
-        echo "Repositories with Security Alerts: $repos_with_alerts" | tee -a "$REPORT_FILE"
-    else
-        echo "Advanced Security enabled but no repositories configured" | tee -a "$REPORT_FILE"
-    fi
+            done < <(jq -c --arg proj "$project" '.[] | select(.project == $proj)' "$REPO_DETAILS_FILE")
+        fi
+    done
+    
+    echo "" | tee -a "$REPORT_FILE"
+    echo "Total Secret Scanning Alerts: $total_secret_alerts" | tee -a "$REPORT_FILE"
+    echo "Total Dependency Scanning Alerts: $total_dependency_alerts" | tee -a "$REPORT_FILE"
+    echo "Total Code Scanning Alerts: $total_code_alerts" | tee -a "$REPORT_FILE"
+    echo "Repositories with Security Alerts: $repos_with_alerts" | tee -a "$REPORT_FILE"
 else
     echo "Advanced Security is NOT enabled for this organization" | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
@@ -602,7 +738,7 @@ total_hooks=0
 hook_types=()
 
 for project in "${projects[@]}"; do
-    echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
