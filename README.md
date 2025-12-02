@@ -1,6 +1,8 @@
 # Azure DevOps Data Collection Report
 
 A script to collect data from Azure DevOps organizations.
+This is designed as an easy script for Azure DevOps Administrators to run on each organization to understand their ADO landscape. 
+Solving "As an ADO Administrator I don't want to write a custom API script or click through many pages to get visibility into ADO data."
 
 ## Overview
 
