@@ -8,9 +8,36 @@ The `ado-data-collector.sh` script automates the collection of data from your Az
 
 ## Prerequisites
 
-Before running the script, ensure you have the following installed:
+Before running the script, ensure you have the following:
 
-1. **jq** (JSON processor):
+### Azure DevOps Organization Settings
+
+1. **Third-Party application access via OAuth** must be enabled:
+   - Go to your Azure DevOps organization: `https://dev.azure.com/{your-org}`
+   - Click **Organization settings** (bottom left)
+   - Navigate to **Policies** under Security
+   - Enable **Third-party application access via OAuth**
+   
+   ![Third-party OAuth setting](https://private-user-images.githubusercontent.com/7114832/519647127-501df529-0acc-4957-9534-caa80890c21a.png)
+
+2. **Azure account access**: Your Azure account must have access to the Azure DevOps organization you want to scan
+
+### Required Tools
+
+1. **Azure CLI** (for authentication):
+   ```bash
+   # macOS
+   brew install azure-cli
+   
+   # Linux (Ubuntu/Debian)
+   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+   
+   # Linux (RHEL/CentOS)
+   sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+   sudo dnf install azure-cli
+   ```
+
+2. **jq** (JSON processor):
    ```bash
    # macOS
    brew install jq
@@ -22,9 +49,9 @@ Before running the script, ensure you have the following installed:
    sudo yum install jq
    ```
 
-2. **curl** (usually pre-installed on most systems)
+3. **curl** (usually pre-installed on most systems)
 
-3. **git** (required only if using `SCAN_LARGE_FILES=1` option):
+4. **git** (required only if using `SCAN_LARGE_FILES=1` option):
    ```bash
    # macOS
    brew install git
@@ -38,35 +65,30 @@ Before running the script, ensure you have the following installed:
 
 ## Setup Instructions
 
-### Step 1: Generate a Personal Access Token (PAT)
+### Step 1: Login to Azure
 
-1. Log into your Azure DevOps organization at `https://dev.azure.com/{your-org}`
-2. Click on **User Settings** (gear icon) → **Personal Access Tokens**
-3. Click **+ New Token**
-4. Configure the token:
-   - **Name**: "ADO Data Collector"
-   - **Organization**: Select your organization or "All accessible organizations"
-   - **Expiration**: Set to 30 days (or as needed)
-   - **Scopes**: Select **Custom defined** and grant:
-     - ✅ **Code**: Read
-     - ✅ **Project and Team**: Read
-     - ✅ **Work Items**: Read
-     - ✅ **Build**: Read
-     - ✅ **User Profile**: Read
-     - ✅ **Service Hooks**: Read
-5. Click **Create** and **copy the token** (you won't be able to see it again)
+The script uses Azure AD authentication via the Azure CLI. This is more secure than PAT tokens and provides access to all Azure DevOps APIs including Advanced Security.
+
+```bash
+# Login to Azure (opens browser for authentication)
+az login
+
+# Verify you're logged in
+az account show
+```
+
+**Note**: Your Azure account must have access to the Azure DevOps organization you want to scan.
 
 ### Step 2: Configure the Script
 
 1. Download or clone this repository
 2. Open `ado-data-collector.sh` in a text editor
-3. Update the configuration section at the top:
+3. Update the organization name in the configuration section:
    ```bash
    # -------- CONFIGURATION --------
    DEBUG=${DEBUG:-0}                 # Set to 1 for debug output
    SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}  # Set to 1 to scan for large files
    ORG="your-org-name"               # Replace with your Azure DevOps organization name
-   PAT="your-personal-access-token"  # Replace with the PAT you just created
    ```
 
 ### Step 3: Make the Script Executable
@@ -185,8 +207,9 @@ Note: Temporary data is automatically cleaned up on script completion or interru
 ## Troubleshooting
 
 ### "Authentication Failed" on Startup
-- Verify your PAT is correct and hasn't expired
-- Ensure all required scopes are granted to the PAT
+- Run `az login` to authenticate with Azure
+- Verify your Azure account has access to the Azure DevOps organization
+- Run `az account show` to confirm you're logged in
 - Check that the organization name is correct (no spaces or special characters in URL)
 
 ### "Command not found: jq"
@@ -224,15 +247,14 @@ This repository also includes example scripts:
 
 ## Security Best Practices
 
-- **Never commit your PAT to version control**
 - Add `ado-data-report-*.txt` to `.gitignore`
-- Revoke the PAT after generating the report
 - Store the report securely as it contains organizational information
-- Consider using environment variables for sensitive data:
+- Azure AD tokens are automatically managed and expire after 1 hour
+- No secrets are stored in the script - authentication uses `az login`
+- Consider using environment variables for configuration:
   ```bash
-  export AZDO_ORG="your-org"
-  export AZDO_PAT="your-pat"
-  # Then reference in script: ORG="$AZDO_ORG"
+  export ORG="your-org"
+  # Then reference in script or pass directly
   ```
 
 ## Advanced Usage
@@ -274,16 +296,17 @@ The script is safe for concurrent execution:
 Set configuration via environment variables instead of editing the script:
 ```bash
 export ORG="your-org-name"
-export PAT="your-pat-token"
 export SCAN_LARGE_FILES=1
 export DEBUG=1
 ./ado-data-collector.sh
 ```
+
+**Note**: Authentication is handled via `az login` - no PAT required.
 
 ## Support
 
 For issues or questions:
 1. Review the troubleshooting section above
 2. Check that all prerequisites are installed correctly
-3. Verify PAT permissions and expiration
+3. Verify you're logged in with `az login` and have access to the organization
 4. Open an issue in this repository with error details
