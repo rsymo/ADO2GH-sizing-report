@@ -22,7 +22,17 @@ DEBUG=${DEBUG:-0}
 # Set SCAN_LARGE_FILES=1 to clone repos and scan for large files (slower but accurate)
 SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}
 # Azure DevOps organization name
-ORG="Your-Organisation-Name"
+ORG="${ORG:-}"
+if [ -z "$ORG" ]; then
+    echo "ERROR: ORG environment variable is not set"
+    echo "Please set it to your Azure DevOps organization name:"
+    echo "  export ORG=your-org-name"
+    echo "  ./ado-data-collector.sh"
+    echo ""
+    echo "Or set it inline:"
+    echo "  ORG=your-org-name ./ado-data-collector.sh"
+    exit 1
+fi
 ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
@@ -31,8 +41,14 @@ REPORT_FILE="ado-data-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
 TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
 
-# Set up cleanup trap to remove temp directory on exit (success or failure)
-trap 'rm -rf "$TEMP_DATA_DIR"' EXIT INT TERM
+# Set up cleanup trap to remove temp directory and secure files on exit (success or failure)
+# This ensures bearer tokens in curl config are always cleaned up
+cleanup() {
+    rm -rf "$TEMP_DATA_DIR"
+    # Explicitly remove curl config if it exists outside temp dir
+    [ -n "$CURL_CONFIG_FILE" ] && rm -f "$CURL_CONFIG_FILE" 2>/dev/null
+}
+trap cleanup EXIT INT TERM
 
 # API version
 API_VERSION="7.1"
@@ -70,6 +86,23 @@ echo ""
 
 # -------- HELPER FUNCTIONS --------
 
+# Create a secure curl config file with authentication header
+# This prevents token exposure in process listings
+# Use mktemp for secure, unpredictable filename to prevent race conditions
+CURL_CONFIG_FILE=$(mktemp "$TEMP_DATA_DIR/curl_config.XXXXXX")
+chmod 600 "$CURL_CONFIG_FILE"  # Ensure restrictive permissions from the start
+
+create_curl_config() {
+    # Write headers to config file (already has 600 permissions from mktemp)
+    cat > "$CURL_CONFIG_FILE" << EOF
+header = "Authorization: Bearer $ADO_TOKEN"
+header = "Accept: application/json"
+EOF
+}
+
+# Initialize curl config on first call
+create_curl_config
+
 # Function to refresh Azure AD token for long-running operations
 # Tokens typically expire after 1 hour, so refresh before long operations
 refresh_token() {
@@ -77,6 +110,8 @@ refresh_token() {
     local new_token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>/dev/null)
     if [ -n "$new_token" ]; then
         ADO_TOKEN="$new_token"
+        # Recreate curl config with new token
+        create_curl_config
         [ "$DEBUG" = "1" ] && echo "[DEBUG] Token refreshed successfully" >&2
     else
         [ "$DEBUG" = "1" ] && echo "[DEBUG] WARNING: Failed to refresh token, continuing with existing token" >&2
@@ -84,13 +119,12 @@ refresh_token() {
 }
 
 # Function to make Azure DevOps API calls (GET requests)
-# Uses Azure AD Bearer token authentication
+# Uses secure curl config file to avoid token exposure in process listings
 call_api() {
     local endpoint="$1"
     [ "$DEBUG" = "1" ] && echo "[DEBUG] GET: $endpoint" >&2
     curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 \
-        -H "Authorization: Bearer $ADO_TOKEN" \
-        -H "Accept: application/json" \
+        --config "$CURL_CONFIG_FILE" \
         "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
 
@@ -100,8 +134,7 @@ call_api_post() {
     local data="$2"
     [ "$DEBUG" = "1" ] && echo "[DEBUG] POST: $endpoint" >&2
     curl -s -f -L --max-time 30 --retry 2 --retry-delay 1 \
-        -H "Authorization: Bearer $ADO_TOKEN" \
-        -H "Accept: application/json" \
+        --config "$CURL_CONFIG_FILE" \
         -H "Content-Type: application/json" \
         -X POST -d "$data" "$endpoint" 2>/dev/null || echo "API_ERROR"
 }
@@ -406,7 +439,7 @@ if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
             project=$(echo "$repo" | jq -r '.project')
             repo_name=$(echo "$repo" | jq -r '.name')
             
-            echo "  Scanning $project/$repo_name..." | tee -a "$REPORT_FILE"
+            [ "$DEBUG" = "1" ] && echo "  Scanning $project/$repo_name..." | tee -a "$REPORT_FILE"
             
             # URL encode project name for clone URL
             project_encoded=$(url_encode "$project")
@@ -515,7 +548,7 @@ total_pull_requests=0
 projects_with_boards=0
 
 for project in "${projects[@]}"; do
-    echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking metadata for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
@@ -567,7 +600,7 @@ total_pipelines=0
 repos_with_pipelines=0
 
 for project in "${projects[@]}"; do
-    echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking pipelines for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
@@ -616,7 +649,7 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
     
     # Iterate through all projects and their repositories
     for project in "${projects[@]}"; do
-        echo "  Checking Advanced Security for project: $project" | tee -a "$REPORT_FILE"
+        [ "$DEBUG" = "1" ] && echo "  Checking Advanced Security for project: $project" | tee -a "$REPORT_FILE"
         
         # URL encode project name
         project_encoded=$(url_encode "$project")
@@ -634,9 +667,13 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                 # Query each alert type separately using criteria.alertType filter
                 # alertType values: 1=dependency, 2=secret, 3=code
                 # criteria.states=1 means active alerts only
-                # criteria.confidenceLevels includes High, Medium, Low, Other for comprehensive results
+                # 
+                # Note on confidence levels:
+                # - Secret alerts (type 2) use confidence levels (High, Medium, Low, Other) because they use ML-based detection
+                # - Dependency alerts (type 1) don't use confidence levels; they're based on CVE databases (deterministic)
+                # - Code alerts (type 3) use severity levels, not confidence levels
                 
-                # Secret alerts (alertType=2) - need to include all confidence levels
+                # Secret alerts (alertType=2) - include all confidence levels for comprehensive results
                 secret_alerts=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/alert/repositories/$repo_id/alerts?criteria.alertType=2&criteria.states=1&criteria.confidenceLevels=High&criteria.confidenceLevels=Medium&criteria.confidenceLevels=Low&criteria.confidenceLevels=Other&api-version=7.2-preview.1")
                 if [ "$secret_alerts" != "API_ERROR" ] && echo "$secret_alerts" | jq empty 2>/dev/null; then
                     secret_count=$(echo "$secret_alerts" | jq '.count // 0' 2>/dev/null || echo "0")
@@ -701,7 +738,7 @@ total_hooks=0
 hook_types=()
 
 for project in "${projects[@]}"; do
-    echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
+    [ "$DEBUG" = "1" ] && echo "  Checking service hooks for project: $project" | tee -a "$REPORT_FILE"
     
     # URL encode project name
     project_encoded=$(url_encode "$project")
