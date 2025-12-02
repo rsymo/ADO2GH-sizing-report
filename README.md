@@ -18,7 +18,7 @@ Before running the script, ensure you have the following:
    - Navigate to **Policies** under Security
    - Enable **Third-party application access via OAuth**
    
-   ![Third-party OAuth setting](https://private-user-images.githubusercontent.com/7114832/519647127-501df529-0acc-4957-9534-caa80890c21a.png)
+   ![Third-party OAuth setting](docs/images/third-party-oauth-setting.png)
 
 2. **Azure account access**: Your Azure account must have access to the Azure DevOps organization you want to scan
 
