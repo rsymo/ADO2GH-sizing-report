@@ -22,7 +22,7 @@ DEBUG=${DEBUG:-0}
 # Set SCAN_LARGE_FILES=1 to clone repos and scan for large files (slower but accurate)
 SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}
 # Azure DevOps organization name
-ORG="me0235"
+ORG="Your-Organisation-Name"
 ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
@@ -69,6 +69,19 @@ echo "Authentication successful!"
 echo ""
 
 # -------- HELPER FUNCTIONS --------
+
+# Function to refresh Azure AD token for long-running operations
+# Tokens typically expire after 1 hour, so refresh before long operations
+refresh_token() {
+    [ "$DEBUG" = "1" ] && echo "[DEBUG] Refreshing Azure AD token..." >&2
+    local new_token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>/dev/null)
+    if [ -n "$new_token" ]; then
+        ADO_TOKEN="$new_token"
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] Token refreshed successfully" >&2
+    else
+        [ "$DEBUG" = "1" ] && echo "[DEBUG] WARNING: Failed to refresh token, continuing with existing token" >&2
+    fi
+}
 
 # Function to make Azure DevOps API calls (GET requests)
 # Uses Azure AD Bearer token authentication
@@ -369,6 +382,9 @@ write_section "5. Large Files Scan (Individual File Sizes)"
 
 # Check if Git is available and user opted in for scanning
 if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
+    # Refresh token before long-running operation (cloning can take time)
+    refresh_token
+    
     echo "Scanning repositories for large files (>50MB)..." | tee -a "$REPORT_FILE"
     echo "This will clone repositories and may take some time..." | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
