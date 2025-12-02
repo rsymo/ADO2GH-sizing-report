@@ -79,17 +79,19 @@ az account show
 
 **Note**: Your Azure account must have access to the Azure DevOps organization you want to scan.
 
-### Step 2: Configure the Script
+### Step 2: Set Organization Name
 
-1. Download or clone this repository
-2. Open `ado-data-collector.sh` in a text editor
-3. Update the organization name in the configuration section:
-   ```bash
-   # -------- CONFIGURATION --------
-   DEBUG=${DEBUG:-0}                 # Set to 1 for debug output
-   SCAN_LARGE_FILES=${SCAN_LARGE_FILES:-0}  # Set to 1 to scan for large files
-   ORG="your-org-name"               # Replace with your Azure DevOps organization name
-   ```
+The script requires you to specify your Azure DevOps organization name via the `ORG` environment variable:
+
+```bash
+# Set your organization name
+export ORG="your-org-name"
+
+# Or set it inline when running the script
+ORG="your-org-name" ./ado-data-collector.sh
+```
+
+**Note**: The script will fail with a clear error message if `ORG` is not set, preventing accidental runs against invalid organizations.
 
 ### Step 3: Make the Script Executable
 
@@ -101,16 +103,16 @@ chmod +x ado-data-collector.sh
 
 ```bash
 # Run with default mode (API-only, faster)
-./ado-data-collector.sh
+ORG="your-org-name" ./ado-data-collector.sh
 
 # Run with large file scanning (clones repos, slower but detects individual large files)
-SCAN_LARGE_FILES=1 ./ado-data-collector.sh
+ORG="your-org-name" SCAN_LARGE_FILES=1 ./ado-data-collector.sh
 
 # Run with debug output to see API calls
-DEBUG=1 ./ado-data-collector.sh
+ORG="your-org-name" DEBUG=1 ./ado-data-collector.sh
 
 # Combine options
-DEBUG=1 SCAN_LARGE_FILES=1 ./ado-data-collector.sh
+ORG="your-org-name" DEBUG=1 SCAN_LARGE_FILES=1 ./ado-data-collector.sh
 ```
 
 The script will:
@@ -247,15 +249,18 @@ This repository also includes example scripts:
 
 ## Security Best Practices
 
-- Add `ado-data-report-*.txt` to `.gitignore`
-- Store the report securely as it contains organizational information
-- Azure AD tokens are automatically managed and expire after 1 hour
-- No secrets are stored in the script - authentication uses `az login`
-- Consider using environment variables for configuration:
-  ```bash
-  export ORG="your-org"
-  # Then reference in script or pass directly
-  ```
+- **Token Security**: Azure AD bearer tokens are stored in secure temporary files with restrictive permissions (600)
+  - Never exposed in process listings or command-line arguments
+  - Automatically cleaned up on script exit (success, failure, or interruption)
+  - Uses `mktemp` for unpredictable filenames to prevent race conditions
+- **Token Lifecycle**: Tokens automatically expire after 1 hour; script includes refresh logic for long-running operations
+- **No Secrets in Code**: Authentication uses `az login` - no PAT tokens or credentials stored in script
+- **Clean Output**: Progress messages hidden by default; use `DEBUG=1` for detailed output
+- **Secure Cleanup**: Trap handlers ensure temporary files are removed even if script is interrupted
+- **Report Security**: 
+  - Add `ado-data-report-*.txt` to `.gitignore`
+  - Store reports securely as they contain organizational information
+  - Consider encrypting reports if storing long-term
 
 ## Advanced Usage
 
@@ -293,13 +298,25 @@ The script is safe for concurrent execution:
 - Multiple instances can run simultaneously without conflicts
 
 ### Environment Variables
-Set configuration via environment variables instead of editing the script:
+Configure the script using environment variables:
 ```bash
+# Required: Set your organization name
 export ORG="your-org-name"
+
+# Optional: Enable large file scanning
 export SCAN_LARGE_FILES=1
+
+# Optional: Enable debug output
 export DEBUG=1
+
+# Run the script
 ./ado-data-collector.sh
 ```
+
+**Configuration Options:**
+- `ORG` (required): Your Azure DevOps organization name
+- `SCAN_LARGE_FILES` (optional, default=0): Set to 1 to scan for large files
+- `DEBUG` (optional, default=0): Set to 1 for detailed API call output
 
 **Note**: Authentication is handled via `az login` - no PAT required.
 
