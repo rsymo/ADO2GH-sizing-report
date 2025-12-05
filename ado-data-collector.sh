@@ -256,6 +256,13 @@ for project in "${projects[@]}"; do
     # URL encode project name to handle special characters
     project_encoded=$(url_encode "$project")
     
+    # Get project details to determine visibility
+    project_details=$(call_api "$ORG_URL/_apis/projects/$project_encoded?api-version=$API_VERSION")
+    project_visibility="private"  # default to private
+    if [ "$project_details" != "API_ERROR" ] && echo "$project_details" | jq empty 2>/dev/null; then
+        project_visibility=$(echo "$project_details" | jq -r '.visibility // "private"')
+    fi
+    
     # Get repos for this project
     repos_json=$(call_api "$ORG_URL/$project_encoded/_apis/git/repositories?api-version=$API_VERSION")
     
@@ -268,9 +275,9 @@ for project in "${projects[@]}"; do
     repo_count=$(echo "$repos_json" | jq -r '.value | length')
     total_repos=$((total_repos + repo_count))
     
-    # Store repo details for later analysis
-    # Use jq --arg to safely pass project name (handles quotes and backslashes)
-    echo "$repos_json" | jq -c --arg proj "$project" '.value[] | {project: $proj, name: .name, id: .id, size: .size, defaultBranch: .defaultBranch, remoteUrl: .remoteUrl}' >> "$REPO_DETAILS_FILE.tmp"
+    # Store repo details for later analysis, including project visibility
+    # Use jq --arg to safely pass project name and visibility (handles quotes and backslashes)
+    echo "$repos_json" | jq -c --arg proj "$project" --arg vis "$project_visibility" '.value[] | {project: $proj, projectVisibility: $vis, name: .name, id: .id, size: .size, defaultBranch: .defaultBranch, remoteUrl: .remoteUrl}' >> "$REPO_DETAILS_FILE.tmp"
 done
 
 # Consolidate all repo details into a single JSON array
@@ -288,9 +295,36 @@ echo "Total Projects: $project_count" | tee -a "$REPORT_FILE"
 echo "Total Repositories: $total_repos" | tee -a "$REPORT_FILE"
 
 # ========================================
-# 2. REPOSITORIES OVER 1GB (API-REPORTED SIZE)
+# 2. PUBLIC REPOSITORIES
 # ========================================
-write_section "2. Repositories Over 1GB (API-Reported Size)"
+write_section "2. Public Repositories"
+
+echo "Checking for public repositories..." | tee -a "$REPORT_FILE"
+
+if [ -f "$REPO_DETAILS_FILE" ]; then
+    # Count public repositories
+    public_repo_count=$(jq -r '[.[] | select(.projectVisibility == "public")] | length' "$REPO_DETAILS_FILE")
+    
+    if [ "$public_repo_count" -gt 0 ]; then
+        echo "Found $public_repo_count public repositories:" | tee -a "$REPORT_FILE"
+        echo "" | tee -a "$REPORT_FILE"
+        
+        # List all public repositories with their details
+        jq -r '.[] | select(.projectVisibility == "public") | "  Project: \(.project)\n  Repository: \(.name)\n  URL: \(.remoteUrl)\n"' "$REPO_DETAILS_FILE" | tee -a "$REPORT_FILE"
+        
+        echo "⚠️  WARNING: These repositories are currently PUBLIC and accessible to anyone." | tee -a "$REPORT_FILE"
+        echo "   Consider reviewing their visibility settings before migration." | tee -a "$REPORT_FILE"
+    else
+        echo "No public repositories found. All repositories are private." | tee -a "$REPORT_FILE"
+    fi
+else
+    echo "No repository data available to analyze." | tee -a "$REPORT_FILE"
+fi
+
+# ========================================
+# 3. REPOSITORIES OVER 1GB (API-REPORTED SIZE)
+# ========================================
+write_section "3. Repositories Over 1GB (API-Reported Size)"
 
 echo "Analyzing repository sizes from Azure DevOps API..." | tee -a "$REPORT_FILE"
 
@@ -313,9 +347,9 @@ else
 fi
 
 # ========================================
-# 3. LARGEST REPOSITORY (API-REPORTED SIZE)
+# 4. LARGEST REPOSITORY (API-REPORTED SIZE)
 # ========================================
-write_section "3. Largest Repository (API-Reported Size)"
+write_section "4. Largest Repository (API-Reported Size)"
 
 if [ -f "$REPO_DETAILS_FILE" ]; then
     # Check if any repos have size data
@@ -332,9 +366,9 @@ else
 fi
 
 # ========================================
-# 4. OLDEST REPOSITORY
+# 5. OLDEST REPOSITORY
 # ========================================
-write_section "4. Oldest Repository"
+write_section "5. Oldest Repository"
 
 echo "Finding oldest repository (by first commit date)..." | tee -a "$REPORT_FILE"
 
@@ -409,9 +443,9 @@ else
 fi
 
 # ========================================
-# 5. LARGE FILES SCAN (INDIVIDUAL FILE SIZES)
+# 6. LARGE FILES SCAN (INDIVIDUAL FILE SIZES)
 # ========================================
-write_section "5. Large Files Scan (Individual File Sizes)"
+write_section "6. Large Files Scan (Individual File Sizes)"
 
 # Check if Git is available and user opted in for scanning
 if [ "$SCAN_LARGE_FILES" = "1" ] && command -v git &> /dev/null; then
@@ -537,9 +571,9 @@ else
 fi
 
 # ========================================
-# 6. METADATA DATA
+# 7. METADATA DATA
 # ========================================
-write_section "6. Metadata Data"
+write_section "7. Metadata Data"
 
 echo "Checking for work items, pull requests, and boards..." | tee -a "$REPORT_FILE"
 
@@ -590,9 +624,9 @@ echo "Total Pull Requests: $total_pull_requests" | tee -a "$REPORT_FILE"
 echo "Projects with Boards/Teams: $projects_with_boards" | tee -a "$REPORT_FILE"
 
 # ========================================
-# 7. PIPELINE DATA
+# 8. PIPELINE DATA
 # ========================================
-write_section "7. Pipeline Data"
+write_section "8. Pipeline Data"
 
 echo "Checking for existing pipelines..." | tee -a "$REPORT_FILE"
 
@@ -624,9 +658,9 @@ echo "Total Pipelines: $total_pipelines" | tee -a "$REPORT_FILE"
 echo "Repositories with Pipelines: $repos_with_pipelines" | tee -a "$REPORT_FILE"
 
 # ========================================
-# 8. SECURITY SCANNING (ADVANCED SECURITY)
+# 9. SECURITY SCANNING (ADVANCED SECURITY)
 # ========================================
-write_section "8. Security Scanning (Advanced Security)"
+write_section "9. Security Scanning (Advanced Security)"
 
 echo "Checking for Azure DevOps Advanced Security alerts..." | tee -a "$REPORT_FILE"
 
@@ -728,9 +762,9 @@ else
 fi
 
 # ========================================
-# 9. CUSTOM INTEGRATIONS
+# 10. CUSTOM INTEGRATIONS (SERVICE HOOKS)
 # ========================================
-write_section "9. Custom Integrations (Service Hooks)"
+write_section "10. Custom Integrations (Service Hooks)"
 
 echo "Checking for service hooks and integrations..." | tee -a "$REPORT_FILE"
 
@@ -769,9 +803,9 @@ if [ -f "$TEMP_DATA_DIR/hook_types.txt" ]; then
 fi
 
 # ========================================
-# 10. USER DATA
+# 11. USER DATA
 # ========================================
-write_section "10. User Data"
+write_section "11. User Data"
 
 echo "Collecting user information..." | tee -a "$REPORT_FILE"
 
