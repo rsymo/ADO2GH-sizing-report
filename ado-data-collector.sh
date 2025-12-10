@@ -825,7 +825,8 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                                     severity=$(echo "$alert_detail" | jq -r '.severity // "Unknown"' 2>/dev/null)
                                     
                                     # Build a JSON object with all fields and use jq @csv for proper escaping
-                                    jq -n \
+                                    # Output raw with -r to avoid double-quoting the entire line
+                                    jq -n -r \
                                         --arg project "$project" \
                                         --arg repo "$repo_name" \
                                         --arg repo_id "$repo_id" \
