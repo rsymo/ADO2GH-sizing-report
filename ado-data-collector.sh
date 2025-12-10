@@ -39,6 +39,8 @@ ORG_URL="https://dev.azure.com/$ORG"
 REPORT_FILE="ado-data-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
 # Secret scanning details report (separate file for detailed security findings)
 SECRET_SCANNING_REPORT="ado-secret-scanning-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
+SECRET_SCANNING_CSV="ado-secret-scanning-$(date +%Y%m%d-%H%M%S)-${RANDOM}.csv"
+SECRET_SCANNING_JSON="ado-secret-scanning-$(date +%Y%m%d-%H%M%S)-${RANDOM}.json"
 # Use PID to create unique temp directory to avoid conflicts with concurrent runs
 TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
@@ -691,6 +693,15 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
     echo "========================================" >> "$SECRET_SCANNING_REPORT"
     echo "" >> "$SECRET_SCANNING_REPORT"
     
+    # Initialize CSV file with headers
+    echo "Project,Repository,Repository ID,Alert ID,Secret Type,Severity,Confidence,State,Validation Status,Validation Message,File Path,Start Line,End Line,Branch,Introduced Date,First Seen,Last Seen,Detection Tools,Alert URL" > "$SECRET_SCANNING_CSV"
+    
+    # Initialize JSON file with metadata and empty alerts array
+    jq -n \
+        --arg org "$ORG" \
+        --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{organization: $org, generated: $generated, alerts: []}' > "$SECRET_SCANNING_JSON"
+    
     # Iterate through all projects and their repositories
     for project in "${projects[@]}"; do
         [ "$DEBUG" = "1" ] && echo "  Checking Advanced Security for project: $project" | tee -a "$REPORT_FILE"
@@ -798,7 +809,8 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                                     if [ -n "$tools" ]; then
                                         echo "    Detection Tools: $tools" >> "$SECRET_SCANNING_REPORT"
                                     else
-                                        echo "    Detection Tools: Not Available" >> "$SECRET_SCANNING_REPORT"
+                                        tools="Not Available"
+                                        echo "    Detection Tools: $tools" >> "$SECRET_SCANNING_REPORT"
                                     fi
                                     
                                     # Alert URL
@@ -806,6 +818,79 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                                     echo "    Alert URL: $alert_url" >> "$SECRET_SCANNING_REPORT"
                                     
                                     echo "" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Write to CSV using jq to properly escape fields
+                                    # This ensures commas, quotes, and newlines in data are handled correctly
+                                    secret_type=$(echo "$alert_detail" | jq -r '.title // "Unknown"' 2>/dev/null)
+                                    severity=$(echo "$alert_detail" | jq -r '.severity // "Unknown"' 2>/dev/null)
+                                    
+                                    # Build a JSON object with all fields and use jq @csv for proper escaping
+                                    jq -n \
+                                        --arg project "$project" \
+                                        --arg repo "$repo_name" \
+                                        --arg repo_id "$repo_id" \
+                                        --arg alert_id "$alert_id" \
+                                        --arg secret_type "$secret_type" \
+                                        --arg severity "$severity" \
+                                        --arg confidence "$confidence" \
+                                        --arg state "$state" \
+                                        --arg validation_status "$validation_status" \
+                                        --arg validation_message "$validation_message" \
+                                        --arg file_path "$file_path" \
+                                        --arg start_line "$start_line" \
+                                        --arg end_line "$end_line" \
+                                        --arg branch "$branch" \
+                                        --arg introduced_date "$introduced_date" \
+                                        --arg first_seen "$first_seen" \
+                                        --arg last_seen "$last_seen" \
+                                        --arg tools "$tools" \
+                                        --arg alert_url "$alert_url" \
+                                        '[$project, $repo, $repo_id, $alert_id, $secret_type, $severity, $confidence, $state, $validation_status, $validation_message, $file_path, $start_line, $end_line, $branch, $introduced_date, $first_seen, $last_seen, $tools, $alert_url] | @csv' \
+                                        >> "$SECRET_SCANNING_CSV"
+                                    
+                                    # Add alert to JSON file
+                                    # Read current JSON, add new alert, write back
+                                    jq \
+                                        --arg project "$project" \
+                                        --arg repo "$repo_name" \
+                                        --arg repo_id "$repo_id" \
+                                        --arg alert_id "$alert_id" \
+                                        --arg secret_type "$secret_type" \
+                                        --arg severity "$severity" \
+                                        --arg confidence "$confidence" \
+                                        --arg state "$state" \
+                                        --arg validation_status "$validation_status" \
+                                        --arg validation_message "$validation_message" \
+                                        --arg file_path "$file_path" \
+                                        --arg start_line "$start_line" \
+                                        --arg end_line "$end_line" \
+                                        --arg branch "$branch" \
+                                        --arg introduced_date "$introduced_date" \
+                                        --arg first_seen "$first_seen" \
+                                        --arg last_seen "$last_seen" \
+                                        --arg tools "$tools" \
+                                        --arg alert_url "$alert_url" \
+                                        '.alerts += [{
+                                            project: $project,
+                                            repository: $repo,
+                                            repositoryId: $repo_id,
+                                            alertId: $alert_id,
+                                            secretType: $secret_type,
+                                            severity: $severity,
+                                            confidence: $confidence,
+                                            state: $state,
+                                            validationStatus: $validation_status,
+                                            validationMessage: $validation_message,
+                                            filePath: $file_path,
+                                            startLine: $start_line,
+                                            endLine: $end_line,
+                                            branch: $branch,
+                                            introducedDate: $introduced_date,
+                                            firstSeen: $first_seen,
+                                            lastSeen: $last_seen,
+                                            detectionTools: $tools,
+                                            alertUrl: $alert_url
+                                        }]' "$SECRET_SCANNING_JSON" > "$SECRET_SCANNING_JSON.tmp" && mv "$SECRET_SCANNING_JSON.tmp" "$SECRET_SCANNING_JSON"
                                 fi
                                 
                                 alert_num=$((alert_num + 1))
@@ -856,6 +941,8 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
     if [ "$total_secret_alerts" -gt 0 ]; then
         echo "" | tee -a "$REPORT_FILE"
         echo "Detailed secret scanning report saved to: $SECRET_SCANNING_REPORT" | tee -a "$REPORT_FILE"
+        echo "Secret scanning CSV (Excel-compatible) saved to: $SECRET_SCANNING_CSV" | tee -a "$REPORT_FILE"
+        echo "Secret scanning JSON (machine-readable) saved to: $SECRET_SCANNING_JSON" | tee -a "$REPORT_FILE"
     fi
 else
     echo "Advanced Security is NOT enabled for this organization" | tee -a "$REPORT_FILE"
@@ -968,6 +1055,8 @@ echo "Report generation complete!" | tee -a "$REPORT_FILE"
 echo "Report saved to: $REPORT_FILE" | tee -a "$REPORT_FILE"
 if [ "$total_secret_alerts" -gt 0 ] && [ -f "$SECRET_SCANNING_REPORT" ]; then
     echo "Secret scanning details saved to: $SECRET_SCANNING_REPORT" | tee -a "$REPORT_FILE"
+    echo "Secret scanning CSV saved to: $SECRET_SCANNING_CSV" | tee -a "$REPORT_FILE"
+    echo "Secret scanning JSON saved to: $SECRET_SCANNING_JSON" | tee -a "$REPORT_FILE"
 fi
 echo "========================================" | tee -a "$REPORT_FILE"
 

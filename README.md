@@ -205,18 +205,38 @@ After running the script, you'll find:
 
 - **`ado-data-report-YYYYMMDD-HHMMSS-XXXXX.txt`** - Main report file with summary statistics
 - **`ado-secret-scanning-YYYYMMDD-HHMMSS-XXXXX.txt`** - Detailed secret scanning report (only generated if secret alerts are found)
+- **`ado-secret-scanning-YYYYMMDD-HHMMSS-XXXXX.csv`** - Excel-compatible CSV export of all secret alerts (only generated if secret alerts are found)
+- **`ado-secret-scanning-YYYYMMDD-HHMMSS-XXXXX.json`** - Machine-readable JSON export of all secret alerts (only generated if secret alerts are found)
 - **`users.csv`** (if users exist) - User list with access levels and contact information
 
 ### Secret Scanning Report Details
 
-When Azure DevOps Advanced Security is enabled and secret alerts are detected, a separate detailed report is generated containing:
+When Azure DevOps Advanced Security is enabled and secret alerts are detected, three separate reports are generated:
 
+#### Text Report (`.txt`)
+Human-readable format containing:
 - **Alert Identification**: Alert ID, secret type, and severity
 - **Validation Information**: Validation status and messages from Azure DevOps
 - **Location Details**: File path, line numbers, and branch information
 - **Timeline**: When the secret was introduced, first seen, and last seen
 - **Detection Tools**: Which scanning tools detected the secret
 - **Direct Links**: URLs to view alerts in Azure DevOps
+
+#### CSV Report (`.csv`)
+Excel-compatible format with the same information in tabular form, allowing system administrators to:
+- Sort and filter by severity, confidence, or validation status
+- Identify patterns across projects and repositories
+- Track remediation progress
+- Generate pivot tables and charts
+- Share filtered subsets with teams
+
+#### JSON Report (`.json`)
+Machine-readable format with structured data, enabling:
+- Programmatic processing and automation
+- Integration with security tools and dashboards
+- Custom reporting and analytics pipelines
+- API consumption by other systems
+- Version control and diff tracking
 
 This detailed report helps security teams prioritize remediation efforts before migration to GitHub.
 
