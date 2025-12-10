@@ -1,5 +1,8 @@
 # Data collection report output files
 ado-data-report-*.txt
 
+# Secret scanning reports (contains sensitive security information)
+ado-secret-scanning-*.txt
+
 # Temporary data directory
 temp_migration_data/

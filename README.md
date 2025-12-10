@@ -177,6 +177,8 @@ The generated report includes factual data only, it does not make assessments or
 ### 8. **Security Scanning (Advanced Security)**
    - **If Advanced Security is enabled**: Reports on security alerts
      - Secret scanning alerts (credentials, tokens, API keys)
+       - **Detailed export**: All secret alert details exported to separate report file
+       - Includes validation status, file locations, severity, confidence levels, and timelines
      - Dependency scanning alerts (vulnerable packages)
      - Code scanning alerts (security vulnerabilities)
      - Repositories with security alerts
@@ -201,8 +203,22 @@ The generated report includes factual data only, it does not make assessments or
 
 After running the script, you'll find:
 
-- **`ado-data-report-YYYYMMDD-HHMMSS-XXXXX.txt`** - Main report file
+- **`ado-data-report-YYYYMMDD-HHMMSS-XXXXX.txt`** - Main report file with summary statistics
+- **`ado-secret-scanning-YYYYMMDD-HHMMSS-XXXXX.txt`** - Detailed secret scanning report (only generated if secret alerts are found)
 - **`users.csv`** (if users exist) - User list with access levels and contact information
+
+### Secret Scanning Report Details
+
+When Azure DevOps Advanced Security is enabled and secret alerts are detected, a separate detailed report is generated containing:
+
+- **Alert Identification**: Alert ID, secret type, and severity
+- **Validation Information**: Validation status and messages from Azure DevOps
+- **Location Details**: File path, line numbers, and branch information
+- **Timeline**: When the secret was introduced, first seen, and last seen
+- **Detection Tools**: Which scanning tools detected the secret
+- **Direct Links**: URLs to view alerts in Azure DevOps
+
+This detailed report helps security teams prioritize remediation efforts before migration to GitHub.
 
 Note: Temporary data is automatically cleaned up on script completion or interruption.
 

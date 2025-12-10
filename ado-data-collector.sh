@@ -37,6 +37,8 @@ ORG_URL="https://dev.azure.com/$ORG"
 
 # Report output file with microsecond precision and random component for uniqueness
 REPORT_FILE="ado-data-report-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
+# Secret scanning details report (separate file for detailed security findings)
+SECRET_SCANNING_REPORT="ado-secret-scanning-$(date +%Y%m%d-%H%M%S)-${RANDOM}.txt"
 # Use PID to create unique temp directory to avoid conflicts with concurrent runs
 TEMP_DATA_DIR="temp_migration_data_$$"
 mkdir -p "$TEMP_DATA_DIR"
@@ -681,6 +683,14 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
     echo "Advanced Security is enabled for this organization" | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
     
+    # Initialize secret scanning detailed report
+    echo "Azure DevOps Secret Scanning Detailed Report" > "$SECRET_SCANNING_REPORT"
+    echo "Organization: $ORG" >> "$SECRET_SCANNING_REPORT"
+    echo "Generated: $(date)" >> "$SECRET_SCANNING_REPORT"
+    echo "" >> "$SECRET_SCANNING_REPORT"
+    echo "========================================" >> "$SECRET_SCANNING_REPORT"
+    echo "" >> "$SECRET_SCANNING_REPORT"
+    
     # Iterate through all projects and their repositories
     for project in "${projects[@]}"; do
         [ "$DEBUG" = "1" ] && echo "  Checking Advanced Security for project: $project" | tee -a "$REPORT_FILE"
@@ -707,11 +717,88 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                 # - Dependency alerts (type 1) don't use confidence levels; they're based on CVE databases (deterministic)
                 # - Code alerts (type 3) use severity levels, not confidence levels
                 
-                # Secret alerts (alertType=2) - include all confidence levels for comprehensive results
+                # Secret alerts (alertType=2) - include all confidence levels and all validity states
+                # Using the criteria.validity parameter to get all active secrets regardless of validation status
                 secret_alerts=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/alert/repositories/$repo_id/alerts?criteria.alertType=2&criteria.states=1&criteria.confidenceLevels=High&criteria.confidenceLevels=Medium&criteria.confidenceLevels=Low&criteria.confidenceLevels=Other&api-version=7.2-preview.1")
                 if [ "$secret_alerts" != "API_ERROR" ] && echo "$secret_alerts" | jq empty 2>/dev/null; then
                     secret_count=$(echo "$secret_alerts" | jq '.count // 0' 2>/dev/null || echo "0")
                     [ "$DEBUG" = "1" ] && echo "[DEBUG] Secret alerts response: $secret_alerts" >&2
+                    
+                    # Export detailed secret scanning information if alerts are found
+                    if [ "$secret_count" -gt 0 ]; then
+                        echo "----------------------------------------" >> "$SECRET_SCANNING_REPORT"
+                        echo "Project: $project" >> "$SECRET_SCANNING_REPORT"
+                        echo "Repository: $repo_name" >> "$SECRET_SCANNING_REPORT"
+                        echo "Repository ID: $repo_id" >> "$SECRET_SCANNING_REPORT"
+                        echo "Total Active Secret Alerts: $secret_count" >> "$SECRET_SCANNING_REPORT"
+                        echo "" >> "$SECRET_SCANNING_REPORT"
+                        
+                        # Get detailed information for each alert using the Get Alert API
+                        # https://learn.microsoft.com/en-us/rest/api/azure/devops/advancedsecurity/alerts/get
+                        alert_ids=$(echo "$secret_alerts" | jq -r '.value[]?.alertId // empty' 2>/dev/null)
+                        
+                        if [ -n "$alert_ids" ]; then
+                            alert_num=1
+                            while IFS= read -r alert_id; do
+                                [ -z "$alert_id" ] && continue
+                                
+                                # Get detailed alert information
+                                alert_detail=$(call_api "https://advsec.dev.azure.com/$ORG/$project_encoded/_apis/Alert/repositories/$repo_id/Alerts/$alert_id?api-version=7.2-preview.1")
+                                
+                                if [ "$alert_detail" != "API_ERROR" ] && echo "$alert_detail" | jq empty 2>/dev/null; then
+                                    echo "  Alert #$alert_num (ID: $alert_id)" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Secret Type: $(echo "$alert_detail" | jq -r '.title // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Severity: $(echo "$alert_detail" | jq -r '.severity // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Confidence: $(echo "$alert_detail" | jq -r '.confidenceLevel // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    State: $(echo "$alert_detail" | jq -r '.state // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Validation result information
+                                    validation_status=$(echo "$alert_detail" | jq -r '.validationResult.validationStatus // "Unknown"')
+                                    echo "    Validation Status: $validation_status" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    if [ "$validation_status" != "Unknown" ] && [ "$validation_status" != "null" ]; then
+                                        validation_message=$(echo "$alert_detail" | jq -r '.validationResult.message // ""')
+                                        [ -n "$validation_message" ] && [ "$validation_message" != "null" ] && echo "    Validation Message: $validation_message" >> "$SECRET_SCANNING_REPORT"
+                                    fi
+                                    
+                                    # Location information
+                                    echo "    File Path: $(echo "$alert_detail" | jq -r '.physicalLocations[0].filePath // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Start Line: $(echo "$alert_detail" | jq -r '.physicalLocations[0].region.startLine // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    End Line: $(echo "$alert_detail" | jq -r '.physicalLocations[0].region.endLine // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Branch information
+                                    branch=$(echo "$alert_detail" | jq -r '.logicalLocations.branch // "Unknown"')
+                                    echo "    Branch: $branch" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Introduction information
+                                    introduced_date=$(echo "$alert_detail" | jq -r '.introducedDate // "Unknown"')
+                                    echo "    Introduced Date: $introduced_date" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # First detection
+                                    first_seen=$(echo "$alert_detail" | jq -r '.firstSeenDate // "Unknown"')
+                                    echo "    First Seen: $first_seen" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Last seen
+                                    last_seen=$(echo "$alert_detail" | jq -r '.lastSeenDate // "Unknown"')
+                                    echo "    Last Seen: $last_seen" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Tools information
+                                    tools=$(echo "$alert_detail" | jq -r '.tools[].name // empty' 2>/dev/null | paste -sd "," -)
+                                    [ -n "$tools" ] && echo "    Detection Tools: $tools" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Alert URL
+                                    alert_url="https://dev.azure.com/$ORG/$project/_git/$repo_name/alerts/$alert_id"
+                                    echo "    Alert URL: $alert_url" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    echo "" >> "$SECRET_SCANNING_REPORT"
+                                fi
+                                
+                                alert_num=$((alert_num + 1))
+                            done <<< "$alert_ids"
+                        fi
+                        
+                        echo "" >> "$SECRET_SCANNING_REPORT"
+                    fi
                 else
                     secret_count=0
                 fi
@@ -749,6 +836,12 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
     echo "Total Dependency Scanning Alerts: $total_dependency_alerts" | tee -a "$REPORT_FILE"
     echo "Total Code Scanning Alerts: $total_code_alerts" | tee -a "$REPORT_FILE"
     echo "Repositories with Security Alerts: $repos_with_alerts" | tee -a "$REPORT_FILE"
+    
+    # Add reference to detailed secret scanning report if secrets were found
+    if [ "$total_secret_alerts" -gt 0 ]; then
+        echo "" | tee -a "$REPORT_FILE"
+        echo "Detailed secret scanning report saved to: $SECRET_SCANNING_REPORT" | tee -a "$REPORT_FILE"
+    fi
 else
     echo "Advanced Security is NOT enabled for this organization" | tee -a "$REPORT_FILE"
     echo "" | tee -a "$REPORT_FILE"
@@ -858,6 +951,9 @@ echo "" | tee -a "$REPORT_FILE"
 echo "========================================" | tee -a "$REPORT_FILE"
 echo "Report generation complete!" | tee -a "$REPORT_FILE"
 echo "Report saved to: $REPORT_FILE" | tee -a "$REPORT_FILE"
+if [ "$total_secret_alerts" -gt 0 ] && [ -f "$SECRET_SCANNING_REPORT" ]; then
+    echo "Secret scanning details saved to: $SECRET_SCANNING_REPORT" | tee -a "$REPORT_FILE"
+fi
 echo "========================================" | tee -a "$REPORT_FILE"
 
 # Temp directory will be automatically cleaned up by trap on exit
