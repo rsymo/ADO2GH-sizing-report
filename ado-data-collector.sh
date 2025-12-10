@@ -747,44 +747,59 @@ if [ "$advsec_test" != "API_ERROR" ] && echo "$advsec_test" | jq empty 2>/dev/nu
                                 
                                 if [ "$alert_detail" != "API_ERROR" ] && echo "$alert_detail" | jq empty 2>/dev/null; then
                                     echo "  Alert #$alert_num (ID: $alert_id)" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    Secret Type: $(echo "$alert_detail" | jq -r '.title // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    Severity: $(echo "$alert_detail" | jq -r '.severity // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    Confidence: $(echo "$alert_detail" | jq -r '.confidenceLevel // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    State: $(echo "$alert_detail" | jq -r '.state // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Secret Type: $(echo "$alert_detail" | jq -r '.title // "Unknown"' 2>/dev/null)" >> "$SECRET_SCANNING_REPORT"
+                                    echo "    Severity: $(echo "$alert_detail" | jq -r '.severity // "Unknown"' 2>/dev/null)" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Confidence level - map numeric to text or use confidenceLevel field
+                                    confidence=$(echo "$alert_detail" | jq -r 'if .confidenceLevel then .confidenceLevel elif .confidence then (if .confidence == 1 then "High" elif .confidence == 2 then "Medium" elif .confidence == 3 then "Low" else "Other" end) else "Not Available" end' 2>/dev/null)
+                                    echo "    Confidence: $confidence" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # State - map numeric to text or use state field
+                                    state=$(echo "$alert_detail" | jq -r 'if .state then (if .state == 1 or .state == "active" then "Active" elif .state == 2 or .state == "dismissed" then "Dismissed" elif .state == 4 or .state == "resolved" then "Resolved" else .state end) else "Unknown" end' 2>/dev/null)
+                                    echo "    State: $state" >> "$SECRET_SCANNING_REPORT"
                                     
                                     # Validation result information
-                                    validation_status=$(echo "$alert_detail" | jq -r '.validationResult.validationStatus // "Unknown"')
+                                    validation_status=$(echo "$alert_detail" | jq -r 'if .validationResult then (.validationResult.validationStatus // "Not Validated") else "Not Validated" end' 2>/dev/null)
                                     echo "    Validation Status: $validation_status" >> "$SECRET_SCANNING_REPORT"
                                     
-                                    if [ "$validation_status" != "Unknown" ] && [ "$validation_status" != "null" ]; then
-                                        validation_message=$(echo "$alert_detail" | jq -r '.validationResult.message // ""')
+                                    if [ "$validation_status" != "Not Validated" ] && [ "$validation_status" != "null" ]; then
+                                        validation_message=$(echo "$alert_detail" | jq -r '.validationResult.message // ""' 2>/dev/null)
                                         [ -n "$validation_message" ] && [ "$validation_message" != "null" ] && echo "    Validation Message: $validation_message" >> "$SECRET_SCANNING_REPORT"
                                     fi
                                     
-                                    # Location information
-                                    echo "    File Path: $(echo "$alert_detail" | jq -r '.physicalLocations[0].filePath // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    Start Line: $(echo "$alert_detail" | jq -r '.physicalLocations[0].region.startLine // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
-                                    echo "    End Line: $(echo "$alert_detail" | jq -r '.physicalLocations[0].region.endLine // "Unknown"')" >> "$SECRET_SCANNING_REPORT"
+                                    # Location information - handle array properly
+                                    file_path=$(echo "$alert_detail" | jq -r 'if .physicalLocations then (.physicalLocations[0].filePath // "Not Available") else "Not Available" end' 2>/dev/null)
+                                    echo "    File Path: $file_path" >> "$SECRET_SCANNING_REPORT"
                                     
-                                    # Branch information
-                                    branch=$(echo "$alert_detail" | jq -r '.logicalLocations.branch // "Unknown"')
+                                    start_line=$(echo "$alert_detail" | jq -r 'if .physicalLocations then (.physicalLocations[0].region.startLine // "N/A") else "N/A" end' 2>/dev/null)
+                                    echo "    Start Line: $start_line" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    end_line=$(echo "$alert_detail" | jq -r 'if .physicalLocations then (.physicalLocations[0].region.endLine // "N/A") else "N/A" end' 2>/dev/null)
+                                    echo "    End Line: $end_line" >> "$SECRET_SCANNING_REPORT"
+                                    
+                                    # Branch information - logicalLocations can be array or object
+                                    branch=$(echo "$alert_detail" | jq -r 'if .logicalLocations then (if (.logicalLocations | type) == "array" then .logicalLocations[0].branch else .logicalLocations.branch end // "Not Available") else "Not Available" end' 2>/dev/null)
                                     echo "    Branch: $branch" >> "$SECRET_SCANNING_REPORT"
                                     
                                     # Introduction information
-                                    introduced_date=$(echo "$alert_detail" | jq -r '.introducedDate // "Unknown"')
+                                    introduced_date=$(echo "$alert_detail" | jq -r '.introducedDate // "Not Available"' 2>/dev/null)
                                     echo "    Introduced Date: $introduced_date" >> "$SECRET_SCANNING_REPORT"
                                     
                                     # First detection
-                                    first_seen=$(echo "$alert_detail" | jq -r '.firstSeenDate // "Unknown"')
+                                    first_seen=$(echo "$alert_detail" | jq -r '.firstSeenDate // "Not Available"' 2>/dev/null)
                                     echo "    First Seen: $first_seen" >> "$SECRET_SCANNING_REPORT"
                                     
                                     # Last seen
-                                    last_seen=$(echo "$alert_detail" | jq -r '.lastSeenDate // "Unknown"')
+                                    last_seen=$(echo "$alert_detail" | jq -r '.lastSeenDate // "Not Available"' 2>/dev/null)
                                     echo "    Last Seen: $last_seen" >> "$SECRET_SCANNING_REPORT"
                                     
                                     # Tools information
-                                    tools=$(echo "$alert_detail" | jq -r '.tools[].name // empty' 2>/dev/null | paste -sd "," -)
-                                    [ -n "$tools" ] && echo "    Detection Tools: $tools" >> "$SECRET_SCANNING_REPORT"
+                                    tools=$(echo "$alert_detail" | jq -r '.tools[]?.name // empty' 2>/dev/null | paste -sd "," -)
+                                    if [ -n "$tools" ]; then
+                                        echo "    Detection Tools: $tools" >> "$SECRET_SCANNING_REPORT"
+                                    else
+                                        echo "    Detection Tools: Not Available" >> "$SECRET_SCANNING_REPORT"
+                                    fi
                                     
                                     # Alert URL
                                     alert_url="https://dev.azure.com/$ORG/$project/_git/$repo_name/alerts/$alert_id"
